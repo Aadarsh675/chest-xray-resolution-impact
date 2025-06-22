@@ -36,9 +36,40 @@ class NIHDatasetOrganizer:
         
     def dataset_already_downloaded(self) -> bool:
         """Check if dataset is already downloaded."""
-        return (os.path.exists(self.raw_images_path) and 
-                len(os.listdir(self.raw_images_path)) > 0 and
-                os.path.exists(self.expected_file))
+        # Check for CSV files which are essential
+        csv_files = ["Data_Entry_2017.csv", "BBox_List_2017.csv"]
+        
+        # Look in various possible locations
+        possible_paths = [
+            self.raw_path,
+            os.path.join(self.raw_path, "data"),
+            os.path.join(self.raw_path, "archive")
+        ]
+        
+        csv_found = False
+        images_found = False
+        
+        # Check for CSV files
+        for path in possible_paths:
+            if all(os.path.exists(os.path.join(path, csv)) for csv in csv_files):
+                csv_found = True
+                break
+        
+        # Check for image files
+        image_patterns = ["images", "images_001", "png_images", "data"]
+        for base in possible_paths:
+            for pattern in image_patterns:
+                img_path = os.path.join(base, pattern)
+                if os.path.exists(img_path) and os.path.isdir(img_path):
+                    # Check if it contains PNG files
+                    files = os.listdir(img_path)
+                    if any(f.endswith('.png') for f in files[:10]):
+                        images_found = True
+                        break
+            if images_found:
+                break
+        
+        return csv_found and images_found
     
     def download_dataset(self):
         """Download NIH dataset if not already present."""
@@ -47,13 +78,43 @@ class NIHDatasetOrganizer:
             return
         
         print(f"⬇️ Downloading NIH dataset to {self.raw_path}...")
-        try:
-            path = kagglehub.dataset_download("nih-chest-xrays/data", 
-                                            path=self.raw_path)
-            print("✅ Download complete.")
-        except Exception as e:
-            print(f"❌ Error downloading dataset: {e}")
-            raise
+        
+        # Try different dataset identifiers
+        dataset_identifiers = [
+            "nih-chest-xrays/data",
+            "nih-chest-xrays/nih-chest-xrays",
+            "nihchestxrays/data",
+            "nih/chest-xrays"
+        ]
+        
+        download_success = False
+        last_error = None
+        
+        for identifier in dataset_identifiers:
+            try:
+                print(f"   Trying identifier: {identifier}")
+                path = kagglehub.dataset_download(identifier, path=self.raw_path)
+                print("✅ Download complete.")
+                download_success = True
+                break
+            except Exception as e:
+                last_error = e
+                print(f"   ❌ Failed with: {identifier}")
+                continue
+        
+        if not download_success:
+            print(f"\n❌ Could not download dataset automatically.")
+            print(f"Last error: {last_error}")
+            print("\n📋 Manual download instructions:")
+            print("1. Visit: https://www.kaggle.com/datasets/nih-chest-xrays/data")
+            print("2. Click 'Download' button (requires Kaggle account)")
+            print("3. Extract the downloaded archive to: " + self.raw_path)
+            print("4. Ensure the images are in: " + self.raw_images_path)
+            print("\nAlternatively, try running:")
+            print("   kaggle datasets download -d nih-chest-xrays/data")
+            print("   unzip -q data.zip -d " + self.raw_path)
+            
+            raise Exception("Failed to download dataset. See instructions above.")
     
     def load_metadata(self) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """Load the CSV files containing labels and bbox information."""
@@ -61,12 +122,30 @@ class NIHDatasetOrganizer:
         possible_paths = [
             self.raw_path,
             os.path.join(self.raw_path, "data"),
-            os.path.dirname(self.raw_images_path)
+            os.path.dirname(self.raw_images_path),
+            os.path.join(self.raw_path, "archive"),  # Sometimes in archive folder
+            self.raw_images_path  # Sometimes CSVs are with images
         ]
+        
+        # Also look for the image folders
+        image_folders = ["images", "images_001", "png_images", "data"]
         
         entry_df = None
         bbox_df = None
         
+        # First, try to find where images actually are
+        for base in possible_paths:
+            for img_folder in image_folders:
+                test_path = os.path.join(base, img_folder)
+                if os.path.exists(test_path) and os.path.isdir(test_path):
+                    # Check if it contains images
+                    files = os.listdir(test_path)
+                    if any(f.endswith('.png') for f in files[:10]):  # Check first 10 files
+                        self.raw_images_path = test_path
+                        print(f"✅ Found images at: {test_path}")
+                        break
+        
+        # Now look for CSV files
         for path in possible_paths:
             entry_path = os.path.join(path, "Data_Entry_2017.csv")
             bbox_path = os.path.join(path, "BBox_List_2017.csv")
@@ -80,6 +159,14 @@ class NIHDatasetOrganizer:
                 print(f"✅ Loaded BBox_List_2017.csv from {path}")
         
         if entry_df is None or bbox_df is None:
+            print("\n❌ Could not find required CSV files")
+            print("Looking for:")
+            print("  - Data_Entry_2017.csv")
+            print("  - BBox_List_2017.csv")
+            print("\nSearched in:")
+            for path in possible_paths:
+                print(f"  - {path}")
+            print("\nPlease ensure the dataset is properly extracted.")
             raise FileNotFoundError("Could not find required CSV files")
             
         return entry_df, bbox_df
