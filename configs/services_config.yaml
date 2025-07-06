@@ -1,0 +1,10 @@
+# services_config.yaml
+# Services Configuration
+# Last updated: 2025-04-18
+
+services:
+  - name: detection
+    enabled: true
+    model: codetr
+    dataset: nih-chest-xray
+    weights_path: "s3://medical-cv-models/codetr/nih-chest-xray/best_model.pth"
