@@ -5,8 +5,9 @@ import matplotlib.patches as patches
 from PIL import Image
 import os
 
-# Mount Google Drive
-drive.mount('/content/drive')
+# Mount Google Drive only if not already mounted
+if not os.path.exists('/content/drive'):
+    drive.mount('/content/drive')
 
 # Specify the path to the CSV file and image directory on Google Drive
 csv_path = '/content/drive/My Drive/nih_chest_xray_dataset/BBox_List_2017.csv'  # Adjust path as needed
@@ -18,12 +19,6 @@ df = pd.read_csv(csv_path)
 # Display the number of unique images in the dataset
 num_images = df['Image Index'].nunique()
 print(f"Number of unique images in the dataset: {num_images}")
-
-# Function to parse bounding box coordinates from the 'Bbox [x,y,w,h]' column
-def parse_bbox(bbox_str):
-    # Remove brackets and split by comma
-    bbox = bbox_str.strip('[]').split(',')
-    return [float(coord) for coord in bbox]
 
 # Select a few example images (e.g., first 3)
 num_examples = 3
@@ -44,8 +39,8 @@ for i, row in example_images.iterrows():
     # Load image
     img = Image.open(image_path)
     
-    # Parse bounding box coordinates
-    x, y, w, h = parse_bbox(row['Bbox [x,y,w,h]'])
+    # Get bounding box coordinates from separate columns
+    x, y, w, h = row['Bbox [x'], row['y'], row['w'], row['h]']
     
     # Create subplot
     plt.subplot(num_examples, 1, i + 1)
