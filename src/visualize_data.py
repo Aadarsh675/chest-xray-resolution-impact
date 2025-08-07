@@ -9,8 +9,8 @@ import os
 drive.mount('/content/drive')
 
 # Specify the path to the CSV file and image directory on Google Drive
-csv_path = '/content/drive/My Drive/BBox_List_2017.csv'  # Adjust path as needed
-image_dir = '/content/drive/My Drive/images'  # Adjust to your image directory
+csv_path = '/content/drive/My Drive/nih_chest_xray_dataset/BBox_List_2017.csv'  # Adjust path as needed
+image_dir = '/content/drive/My Drive/nih_chest_xray_dataset/images'  # Adjust to your image directory
 
 # Load the CSV data into a Pandas DataFrame
 df = pd.read_csv(csv_path)
