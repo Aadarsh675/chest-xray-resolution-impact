@@ -1,11 +1,14 @@
 import pandas as pd
 import os
 import json
+from sklearn.model_selection import train_test_split
 
 # ==== CONFIGURATION ====
 CSV_PATH = '/content/drive/My Drive/nih_chest_xray_dataset/BBox_List_2017.csv'
 SAVE_DIR = 'data/annotations'
 SAVE_FILE = os.path.join(SAVE_DIR, 'annotations_coco.json')
+TRAIN_SAVE_FILE = os.path.join(SAVE_DIR, 'train_annotations_coco.json')
+TEST_SAVE_FILE = os.path.join(SAVE_DIR, 'test_annotations_coco.json')
 
 
 def load_csv(csv_path):
@@ -13,6 +16,29 @@ def load_csv(csv_path):
     df = pd.read_csv(csv_path)
     print(f"Loaded {len(df)} rows from {csv_path}")
     return df
+
+
+def split_dataset(df, train_ratio=0.8, random_state=42):
+    """Split DataFrame into train and test sets based on unique image indices."""
+    # Get unique image indices
+    unique_images = df['Image Index'].unique()
+    print(f"Found {len(unique_images)} unique images")
+    
+    # Split images into train and test
+    train_images, test_images = train_test_split(
+        unique_images, 
+        train_size=train_ratio, 
+        random_state=random_state
+    )
+    
+    # Create train and test DataFrames
+    train_df = df[df['Image Index'].isin(train_images)]
+    test_df = df[df['Image Index'].isin(test_images)]
+    
+    print(f"Train set: {len(train_df)} annotations for {len(train_images)} images")
+    print(f"Test set: {len(test_df)} annotations for {len(test_images)} images")
+    
+    return train_df, test_df
 
 
 def build_coco_format(df):
@@ -89,8 +115,19 @@ def save_json(data, save_path):
 
 def main():
     df = load_csv(CSV_PATH)
-    coco_data = build_coco_format(df)
-    save_json(coco_data, SAVE_FILE)
+    
+    # Split dataset into train and test
+    train_df, test_df = split_dataset(df)
+    
+    # Convert to COCO format
+    coco_data = build_coco_format(df)  # Original full dataset
+    train_coco_data = build_coco_format(train_df)
+    test_coco_data = build_coco_format(test_df)
+    
+    # Save JSON files
+    save_json(coco_data, SAVE_FILE)  # Original full dataset
+    save_json(train_coco_data, TRAIN_SAVE_FILE)
+    save_json(test_coco_data, TEST_SAVE_FILE)
 
 
 if __name__ == "__main__":
