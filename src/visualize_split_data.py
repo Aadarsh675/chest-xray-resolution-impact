@@ -40,8 +40,8 @@ def plot_normalized_histogram(labels, norm_counts, title):
     plt.show()
 
 # Main execution
-test_file = 'test_annotations_coco.json'
-train_file = 'train_annotations_coco.json'
+test_file = 'data/annotations/test_annotations_coco.json'
+train_file = 'data/annotations/train_annotations_coco.json'
 
 test_data = load_coco_annotations(test_file)
 train_data = load_coco_annotations(train_file)
