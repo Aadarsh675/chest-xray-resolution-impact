@@ -2,8 +2,6 @@ import os
 import json
 import pandas as pd
 import torch
-import torchvision
-from torchvision.models.detection import detr_resnet50
 from torch.utils.data import DataLoader
 from pycocotools.coco import COCO
 from sklearn.model_selection import train_test_split
@@ -13,11 +11,13 @@ import argparse
 import sys
 from pathlib import Path
 
-# Add Co-DETR repository to sys.path (assumes Co-DETR is cloned locally)
-sys.path.append('/path/to/Co-DETR')  # Update with actual path to Co-DETR repository
+# Add Co-DETR repository to sys.path
+# Update with the actual path to the cloned Co-DETR repository, e.g., '/content/Co-DETR'
+sys.path.append('/content/Co-DETR')  # Adjust to your local Co-DETR repository path
 from models import build_model
 from datasets import build_dataset
 from engine import train_one_epoch, evaluate
+from util.misc import nested_tensor_from_tensor_list
 
 # ==== CONFIGURATION ====
 CSV_PATH = '/content/drive/My Drive/nih_chest_xray_dataset/BBox_List_2017.csv'
@@ -28,11 +28,11 @@ ANNOTATION_DIR = 'data/annotations'
 TRAIN_ANNOTATION_FILE = os.path.join(ANNOTATION_DIR, 'train_annotations_coco.json')
 TEST_ANNOTATION_FILE = os.path.join(ANNOTATION_DIR, 'test_annotations_coco.json')
 OUTPUT_DIR = 'outputs'
-MODEL_NAME = 'codetr'
+MODEL_NAME = 'codetr'  # Co-DETR model variant, adjust based on Co-DETR configs
 BATCH_SIZE = 2
 EPOCHS = 20
 LEARNING_RATE = 1e-4
-NUM_QUERIES = 100  # Co-DETR typically uses a fixed number of object queries
+NUM_QUERIES = 100  # Number of object queries for Co-DETR
 
 def load_csv(csv_path):
     """Load CSV and return DataFrame."""
@@ -133,10 +133,17 @@ class ChestXrayDataset(torch.utils.data.Dataset):
 
 def get_transforms():
     """Define transforms for training and evaluation."""
-    return torchvision.transforms.Compose([
-        torchvision.transforms.ToTensor(),
-        torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    ])
+    from util.misc import NestedTensor
+    def transform(img, target):
+        img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0  # Convert to tensor and normalize
+        return img, target
+    return transform
+
+def collate_fn(batch):
+    """Collate function for DataLoader to handle images and targets."""
+    images, targets = zip(*batch)
+    images = torch.stack(images)
+    return images, targets
 
 def main(args):
     # Load and split dataset
@@ -154,13 +161,19 @@ def main(args):
     test_dataset = ChestXrayDataset(args.test_image_dir, args.test_annotation_file, transforms=get_transforms())
     
     # Initialize data loaders
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=lambda x: tuple(zip(*x)))
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=lambda x: tuple(zip(*x)))
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, collate_fn=collate_fn)
     
     # Initialize Co-DETR model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     num_classes = len(train_dataset.coco.cats) + 1  # +1 for background
-    model = build_model(args.model_name, num_classes=num_classes, num_queries=args.num_queries)
+    model_args = {
+        'backbone': 'resnet50',
+        'num_classes': num_classes,
+        'num_queries': args.num_queries,
+        # Add other Co-DETR specific arguments as needed (check Co-DETR repository)
+    }
+    model = build_model(model_args)
     model.to(device)
     
     # Define optimizer
