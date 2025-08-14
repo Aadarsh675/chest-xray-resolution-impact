@@ -12,10 +12,9 @@ import sys
 from pathlib import Path
 
 # Add Co-DETR repository to sys.path
-# Update with the actual path to the cloned Co-DETR repository, e.g., '/content/Co-DETR'
-sys.path.append('/content/Co-DETR')  # Adjust to your local Co-DETR repository path
-from models import build_model
-from datasets import build_dataset
+sys.path.append('/content/chest-xray-resolution-impact/Co-DETR')  # Updated path
+from models.detr import build_model  # Import from models/detr.py
+from datasets.coco import build as build_dataset
 from engine import train_one_epoch, evaluate
 from util.misc import nested_tensor_from_tensor_list
 
@@ -133,7 +132,6 @@ class ChestXrayDataset(torch.utils.data.Dataset):
 
 def get_transforms():
     """Define transforms for training and evaluation."""
-    from util.misc import NestedTensor
     def transform(img, target):
         img = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0  # Convert to tensor and normalize
         return img, target
@@ -143,6 +141,7 @@ def collate_fn(batch):
     """Collate function for DataLoader to handle images and targets."""
     images, targets = zip(*batch)
     images = torch.stack(images)
+    images = nested_tensor_from_tensor_list(images)
     return images, targets
 
 def main(args):
@@ -169,9 +168,12 @@ def main(args):
     num_classes = len(train_dataset.coco.cats) + 1  # +1 for background
     model_args = {
         'backbone': 'resnet50',
+        'position_embedding': 'sine',
         'num_classes': num_classes,
         'num_queries': args.num_queries,
-        # Add other Co-DETR specific arguments as needed (check Co-DETR repository)
+        'aux_loss': True,
+        'with_box_refine': True,
+        'two_stage': False
     }
     model = build_model(model_args)
     model.to(device)
