@@ -1,13 +1,13 @@
 # train_detr_simplified.py
-# This script fine-tunes a DETR model on a custom COCO-format dataset using Hugging Face Transformers.
+# Fine-tunes DETR on NIH Chest X-ray dataset in COCO format.
 # Dataset structure:
 # data/
 # ├── annotations/
 # │   ├── train_annotations_coco.json
-# │   └── test_annotations_coco.json  # For validation
+# │   └── test_annotations_coco.json
 # └── images/
 #     ├── train/
-#     └── test/  # For validation
+#     └── test/
 
 import os
 import json
@@ -45,28 +45,29 @@ class CocoDetection(Dataset):
         img_id = self.ids[idx]
         img_info = self.coco.loadImgs(img_id)[0]
         img_path = os.path.join(self.img_folder, img_info['file_name'])
-        image = Image.open(img_path).convert("RGB")
+        image = Image.open(img_path).convert("RGB")  # Convert grayscale to RGB
 
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
 
-        # Prepare target for processor
         target = {
             'image_id': img_id,
             'annotations': anns
         }
 
-        # Process image and annotations
         encoding = self.processor(images=image, annotations=target, return_tensors="pt")
-        # Remove batch dimension
         encoding = {k: v.squeeze(0) for k, v in encoding.items()}
         return encoding
 
 def main():
-    # Load image processor
+    # Check device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    # Load processor and model
     processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
 
-    # Load categories from train annotations to get num_labels and id2label
+    # Load categories
     with open(TRAIN_ANNO_FILE, 'r') as f:
         coco_data = json.load(f)
     categories = coco_data['categories']
@@ -74,44 +75,42 @@ def main():
     label2id = {v: k for k, v in id2label.items()}
     num_labels = len(id2label)
 
-    # Print dataset-specific info
-    print(f"Dataset specifics: Medical chest X-ray images with {num_labels} disease classes: {list(id2label.values())}")
+    print(f"Dataset: NIH Chest X-ray with {num_labels} classes: {list(id2label.values())}")
 
-    # Load model with custom num_labels
     model = DetrForObjectDetection.from_pretrained(
         "facebook/detr-resnet-50",
         num_labels=num_labels,
         id2label=id2label,
         label2id=label2id,
-        ignore_mismatched_sizes=True  # To handle class mismatch from pretrained
-    )
+        ignore_mismatched_sizes=True
+    ).to(device)
 
     # Create datasets
     train_dataset = CocoDetection(TRAIN_IMG_DIR, TRAIN_ANNO_FILE, processor)
     val_dataset = CocoDetection(VAL_IMG_DIR, VAL_ANNO_FILE, processor)
 
-    # Define training arguments
-    training_args = TrainingArguments(
-        output_dir="./detr_finetuned",
-        num_train_epochs=50,
-        per_device_train_batch_size=2,  # Small batch due to memory
-        per_device_eval_batch_size=2,
-        warmup_steps=500,
-        weight_decay=0.01,
-        logging_dir='./logs',
-        evaluation_strategy="epoch",
-        save_strategy="epoch",
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
-        remove_unused_columns=False  # Important for custom datasets
-    )
-
-    # Custom collate function for batching
+    # Collate function
     def collate_fn(batch):
         pixel_values = torch.stack([item['pixel_values'] for item in batch])
         pixel_mask = torch.stack([item['pixel_mask'] for item in batch])
         labels = [item['labels'] for item in batch]
         return {'pixel_values': pixel_values, 'pixel_mask': pixel_mask, 'labels': labels}
+
+    # Training arguments
+    training_args = TrainingArguments(
+        output_dir="./detr_finetuned",
+        num_train_epochs=50,
+        per_device_train_batch_size=2,
+        per_device_eval_batch_size=2,
+        warmup_steps=500,
+        weight_decay=0.01,
+        logging_dir='./logs',
+        evaluation_strategy="epoch",  # Correct for transformers 4.55.1
+        save_strategy="epoch",
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        remove_unused_columns=False
+    )
 
     # Initialize Trainer
     trainer = Trainer(
@@ -120,14 +119,17 @@ def main():
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
         data_collator=collate_fn,
-        tokenizer=processor  # Processor acts as tokenizer for images
+        tokenizer=processor
     )
 
-    # Train the model
+    # Train
+    print("Starting training...")
     trainer.train()
 
-    # Save the fine-tuned model
+    # Save model
     trainer.save_model("./detr_finetuned_model")
+    processor.save_pretrained("./detr_finetuned_model")
+    print("Model saved to ./detr_finetuned_model")
 
 if __name__ == "__main__":
     main()
