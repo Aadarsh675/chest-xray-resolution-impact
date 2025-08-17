@@ -25,6 +25,18 @@ class CocoDetection(Dataset):
         self.img_folder = img_folder
         self.processor = processor
         self.ids = list(sorted(self.coco.imgs.keys()))
+        # Validate annotations
+        self._validate_annotations()
+
+    def _validate_annotations(self):
+        for img_id in self.ids:
+            ann_ids = self.coco.getAnnIds(imgIds=img_id)
+            anns = self.coco.loadAnns(ann_ids)
+            for ann in anns:
+                if 'bbox' not in ann or len(ann['bbox']) != 4:
+                    print(f"Invalid bbox for image ID {img_id}, annotation ID {ann['id']}")
+                if 'category_id' not in ann or ann['category_id'] not in self.coco.cats:
+                    print(f"Invalid category_id for image ID {img_id}, annotation ID {ann['id']}")
 
     def __len__(self):
         return len(self.ids)
@@ -52,23 +64,42 @@ class CocoDetection(Dataset):
         # Process image and annotations
         encoding = self.processor(images=image, annotations=target, return_tensors="pt")
         
-        # Squeeze only tensor values, preserve others
+        # Squeeze tensor values, preserve others
         processed_encoding = {}
         for k, v in encoding.items():
             if isinstance(v, torch.Tensor):
-                processed_encoding[k] = v.squeeze(0)  # Remove batch dimension for tensors
+                processed_encoding[k] = v.squeeze(0)
             else:
-                processed_encoding[k] = v  # Keep non-tensor values (e.g., lists in labels) as-is
-        
+                processed_encoding[k] = v
+
+        # Ensure labels is a dictionary with correct structure
+        if 'labels' in processed_encoding and isinstance(processed_encoding['labels'], dict):
+            labels = processed_encoding['labels']
+            if not labels.get('class_labels') or not labels.get('boxes'):
+                # Handle empty or invalid labels
+                processed_encoding['labels'] = {
+                    'boxes': torch.zeros((0, 4), dtype=torch.float32),
+                    'class_labels': torch.zeros((0,), dtype=torch.int64)
+                }
+        else:
+            print(f"Warning: Invalid labels for image ID {img_id}: {processed_encoding.get('labels')}")
+            processed_encoding['labels'] = {
+                'boxes': torch.zeros((0, 4), dtype=torch.float32),
+                'class_labels': torch.zeros((0,), dtype=torch.int64)
+            }
+
         return processed_encoding
 
 def main():
+    # Disable W&B if not needed
+    os.environ["WANDB_MODE"] = "disabled"
+
     # Check device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     # Load processor and model
-    processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50")
+    processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50", size=800)
 
     # Load categories
     with open(TRAIN_ANNO_FILE, 'r') as f:
@@ -95,7 +126,15 @@ def main():
     def collate_fn(batch):
         pixel_values = torch.stack([item['pixel_values'] for item in batch])
         pixel_mask = torch.stack([item['pixel_mask'] for item in batch])
-        labels = [item['labels'] for item in batch]  # Labels remain as list of dicts
+        labels = [item['labels'] for item in batch]  # List of dictionaries
+        # Validate labels structure
+        for i, label in enumerate(labels):
+            if not isinstance(label, dict) or 'class_labels' not in label or 'boxes' not in label:
+                print(f"Invalid labels in batch index {i}: {label}")
+                labels[i] = {
+                    'boxes': torch.zeros((0, 4), dtype=torch.float32),
+                    'class_labels': torch.zeros((0,), dtype=torch.int64)
+                }
         return {'pixel_values': pixel_values, 'pixel_mask': pixel_mask, 'labels': labels}
 
     # Training arguments
