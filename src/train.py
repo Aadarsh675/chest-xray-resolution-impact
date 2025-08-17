@@ -3,18 +3,17 @@
 # Dataset structure:
 # data/
 # ├── annotations/
-# │   ├── train_annotations_coco.json
-# │   └── test_annotations_coco.json
+# │ ├── train_annotations_coco.json
+# │ └── test_annotations_coco.json
 # └── images/
-#     ├── train/
-#     └── test/
-
+# ├── train/
+# └── test/
 import os
 import json
 from pathlib import Path
 from PIL import Image
 import torch
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from pycocotools.coco import COCO
 from transformers import DetrImageProcessor, DetrForObjectDetection
 from transformers import Trainer, TrainingArguments
@@ -23,10 +22,8 @@ from transformers import Trainer, TrainingArguments
 DATA_DIR = "data"
 ANNO_DIR = os.path.join(DATA_DIR, "annotations")
 IMAGE_DIR = os.path.join(DATA_DIR, "images")
-
 TRAIN_ANNO_FILE = os.path.join(ANNO_DIR, "train_annotations_coco.json")
 TRAIN_IMG_DIR = os.path.join(IMAGE_DIR, "train")
-
 VAL_ANNO_FILE = os.path.join(ANNO_DIR, "test_annotations_coco.json")
 VAL_IMG_DIR = os.path.join(IMAGE_DIR, "test")
 
@@ -46,15 +43,12 @@ class CocoDetection(Dataset):
         img_info = self.coco.loadImgs(img_id)[0]
         img_path = os.path.join(self.img_folder, img_info['file_name'])
         image = Image.open(img_path).convert("RGB")  # Convert grayscale to RGB
-
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
-
         target = {
             'image_id': img_id,
             'annotations': anns
         }
-
         encoding = self.processor(images=image, annotations=target, return_tensors="pt")
         encoding = {k: v.squeeze(0) for k, v in encoding.items()}
         return encoding
@@ -74,7 +68,6 @@ def main():
     id2label = {cat['id']: cat['name'] for cat in categories}
     label2id = {v: k for k, v in id2label.items()}
     num_labels = len(id2label)
-
     print(f"Dataset: NIH Chest X-ray with {num_labels} classes: {list(id2label.values())}")
 
     model = DetrForObjectDetection.from_pretrained(
@@ -96,7 +89,7 @@ def main():
         labels = [item['labels'] for item in batch]
         return {'pixel_values': pixel_values, 'pixel_mask': pixel_mask, 'labels': labels}
 
-    # Training arguments
+    # Training arguments (compatible with transformers 4.55.1)
     training_args = TrainingArguments(
         output_dir="./detr_finetuned",
         num_train_epochs=50,
@@ -105,11 +98,13 @@ def main():
         warmup_steps=500,
         weight_decay=0.01,
         logging_dir='./logs',
-        #evaluation_strategy="epoch",  # Correct for transformers 4.55.1
+        evaluation_strategy="epoch",  # Valid for 4.55.1
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        remove_unused_columns=False
+        remove_unused_columns=False,
+        logging_steps=10,
+        save_total_limit=2
     )
 
     # Initialize Trainer
