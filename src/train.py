@@ -1,13 +1,4 @@
 # train_detr_simplified.py
-# Fine-tunes DETR on NIH Chest X-ray dataset in COCO format.
-# Dataset structure:
-# data/
-# ├── annotations/
-# │ ├── train_annotations_coco.json
-# │ └── test_annotations_coco.json
-# └── images/
-# ├── train/
-# └── test/
 import os
 import json
 from pathlib import Path
@@ -42,16 +33,34 @@ class CocoDetection(Dataset):
         img_id = self.ids[idx]
         img_info = self.coco.loadImgs(img_id)[0]
         img_path = os.path.join(self.img_folder, img_info['file_name'])
-        image = Image.open(img_path).convert("RGB")  # Convert grayscale to RGB
+        
+        # Load and convert image to RGB
+        try:
+            image = Image.open(img_path).convert("RGB")
+        except Exception as e:
+            print(f"Error loading image {img_path}: {e}")
+            raise
+        
+        # Load annotations
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
         target = {
             'image_id': img_id,
             'annotations': anns
         }
+
+        # Process image and annotations
         encoding = self.processor(images=image, annotations=target, return_tensors="pt")
-        encoding = {k: v.squeeze(0) for k, v in encoding.items()}
-        return encoding
+        
+        # Squeeze only tensor values, preserve others
+        processed_encoding = {}
+        for k, v in encoding.items():
+            if isinstance(v, torch.Tensor):
+                processed_encoding[k] = v.squeeze(0)  # Remove batch dimension for tensors
+            else:
+                processed_encoding[k] = v  # Keep non-tensor values (e.g., lists in labels) as-is
+        
+        return processed_encoding
 
 def main():
     # Check device
@@ -86,10 +95,10 @@ def main():
     def collate_fn(batch):
         pixel_values = torch.stack([item['pixel_values'] for item in batch])
         pixel_mask = torch.stack([item['pixel_mask'] for item in batch])
-        labels = [item['labels'] for item in batch]
+        labels = [item['labels'] for item in batch]  # Labels remain as list of dicts
         return {'pixel_values': pixel_values, 'pixel_mask': pixel_mask, 'labels': labels}
 
-    # Training arguments (compatible with transformers 4.55.1)
+    # Training arguments
     training_args = TrainingArguments(
         output_dir="./detr_finetuned",
         num_train_epochs=50,
@@ -98,7 +107,7 @@ def main():
         warmup_steps=500,
         weight_decay=0.01,
         logging_dir='./logs',
-        eval_strategy="epoch",  # Changed from evaluation_strategy to eval_strategy
+        eval_strategy="epoch",
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
