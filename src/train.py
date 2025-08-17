@@ -98,7 +98,7 @@ def main():
         warmup_steps=500,
         weight_decay=0.01,
         logging_dir='./logs',
-        evaluation_strategy="epoch",  # Valid for 4.55.1
+        eval_strategy="epoch",  # Changed from evaluation_strategy to eval_strategy
         save_strategy="epoch",
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
