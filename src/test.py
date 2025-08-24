@@ -23,10 +23,10 @@ class SimpleCocoDataset(Dataset):
         self.ids = [img_id for img_id in self.coco.imgs.keys()
                    if len(self.coco.getAnnIds(imgIds=img_id)) > 0]
         print(f"Found {len(self.ids)} images with annotations")
-
+   
     def __len__(self):
         return len(self.ids)
-
+   
     def __getitem__(self, idx):
         img_id = self.ids[idx]
         img_info = self.coco.loadImgs(img_id)[0]
@@ -80,7 +80,11 @@ def evaluate_model(model, dataloader, coco_val, device):
             for i, (boxes, scores, target) in enumerate(zip(outputs.pred_boxes, pred_scores, targets)):
                 img_id = target["image_id"].item()
                 img_info = coco_val.loadImgs(img_id)[0]
-                width, height = img_info["width"], img_info["height"]
+                width = img_info.get("width")
+                height = img_info.get("height")
+                if width is None or height is None:
+                    print(f"Error: Missing dimensions for img_id {img_id}. img_info: {img_info}")
+                    continue
                 boxes = boxes.cpu().numpy()
                 boxes = boxes * np.array([width, height, width, height])
                 boxes[:, [0, 2]] = boxes[:, [0, 2]] - boxes[:, [2, 2]] / 2
@@ -113,7 +117,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     model_dir = "./detr_final"
-    # Fallback to checkpoint if final model directory doesn't exist
     if not os.path.exists(model_dir):
         print(f"Model directory {model_dir} not found. Checking for checkpoints...")
         checkpoint_dirs = [d for d in os.listdir("./checkpoints") if d.startswith("epoch_")]
