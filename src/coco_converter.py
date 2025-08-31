@@ -5,8 +5,8 @@ from sklearn.model_selection import train_test_split
 from PIL import Image
 
 # ==== CONFIGURATION ====
-CSV_PATH = '/content/drive/My Drive/nih_chest_xray_dataset/BBox_List_2017.csv'
-IMAGE_DIR = '/content/drive/My Drive/images'  # Image directory from visualize_data.py
+CSV_PATH = '/content/drive/MyDrive/nih_chest_xray_dataset/BBox_List_2017.csv'
+IMAGE_DIR = '/content/drive/MyDrive/nih_chest_xray_dataset/images'
 SAVE_DIR = 'data/annotations'
 SAVE_FILE = os.path.join(SAVE_DIR, 'annotations_coco.json')
 TRAIN_SAVE_FILE = os.path.join(SAVE_DIR, 'train_annotations_coco.json')
