@@ -1,85 +1,115 @@
 import os
 import json
+import random
+import numpy as np
 from PIL import Image
+
 import torch
 from torch.utils.data import Dataset, DataLoader
+
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
-from transformers import DetrImageProcessor, DetrForObjectDetection
-import numpy as np
 
-# Specify data paths
+from transformers import DetrImageProcessor, DetrForObjectDetection
+
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+
+# -----------------------------
+# Paths & constants
+# -----------------------------
 DATA_DIR = "data"
 ANNO_DIR = os.path.join(DATA_DIR, "annotations")
 IMAGE_DIR = os.path.join(DATA_DIR, "images")
+
 VAL_ANNO_FILE = os.path.join(ANNO_DIR, "test_annotations_coco.json")
 VAL_IMG_DIR = os.path.join(IMAGE_DIR, "test")
 
+WEIGHTS_DIR = "weights"
+MODEL_NAME = "facebook/detr-resnet-50"
+BATCH_SIZE = 2
+NUM_WORKERS = 0
+TOPK = 100         # max predictions per image to keep for evaluation
+SCORE_THRESH = 0.0 # keep 0.0 so COCOeval handles thresholds
+
+
+# -----------------------------
+# Dataset
+# -----------------------------
 class SimpleCocoDataset(Dataset):
     def __init__(self, img_folder, anno_file, processor):
         self.coco = COCO(anno_file)
         self.img_folder = img_folder
         self.processor = processor
+        # Use only images that have at least one annotation
         self.ids = [img_id for img_id in self.coco.imgs.keys()
                     if len(self.coco.getAnnIds(imgIds=img_id)) > 0]
         print(f"Found {len(self.ids)} images with annotations")
-   
+
     def __len__(self):
         return len(self.ids)
-   
+
     def __getitem__(self, idx):
         img_id = self.ids[idx]
         img_info = self.coco.loadImgs(img_id)[0]
         img_path = os.path.join(self.img_folder, img_info['file_name'])
-        try:
-            image = Image.open(img_path).convert("RGB")
-        except Exception as e:
-            print(f"Error loading image {img_path}: {e}")
-            raise
+
+        image = Image.open(img_path).convert("RGB")
         width, height = image.size
+
+        # Load annotations
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
+
+        # Convert COCO bbox [x,y,w,h] -> DETR normalized [cx,cy,w,h]
         boxes = []
         labels = []
         for ann in anns:
             x, y, w, h = ann['bbox']
-            x_center = (x + w/2) / width
-            y_center = (y + h/2) / height
-            w_norm = w / width
-            h_norm = h / height
-            x_center = max(0, min(1, x_center))
-            y_center = max(0, min(1, y_center))
-            w_norm = max(0, min(1, w_norm))
-            h_norm = max(0, min(1, h_norm))
-            boxes.append([x_center, y_center, w_norm, h_norm])
-            labels.append(ann['category_id'] - 1)
+            cx = (x + w / 2.0) / width
+            cy = (y + h / 2.0) / height
+            w_n = w / width
+            h_n = h / height
+            # clamp
+            cx = max(0, min(1, cx))
+            cy = max(0, min(1, cy))
+            w_n = max(0, min(1, w_n))
+            h_n = max(0, min(1, h_n))
+            boxes.append([cx, cy, w_n, h_n])
+            labels.append(ann['category_id'] - 1)  # make 0-indexed
+
         encoding = self.processor(images=image, return_tensors="pt")
         pixel_values = encoding["pixel_values"].squeeze(0)
+
         target = {
             "class_labels": torch.tensor(labels, dtype=torch.long),
             "boxes": torch.tensor(boxes, dtype=torch.float32),
-            "image_id": torch.tensor([img_id], dtype=torch.int64)
+            "image_id": torch.tensor([img_id], dtype=torch.int64),
         }
         return pixel_values, target
+
 
 def collate_fn(batch):
     pixel_values = torch.stack([item[0] for item in batch])
     targets = [item[1] for item in batch]
     return pixel_values, targets
 
-def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thresh=0.0, topk=100):
+
+# -----------------------------
+# Evaluation
+# -----------------------------
+def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thresh=SCORE_THRESH, topk=TOPK):
     model.eval()
     results = []
+
     with torch.no_grad():
         for pixel_values, targets in dataloader:
             pixel_values = pixel_values.to(device)
             outputs = model(pixel_values=pixel_values)
 
-            # batch size
             B = pixel_values.shape[0]
-
             for i in range(B):
-                # get corresponding target
                 target = targets[i]
                 img_id = target["image_id"].item()
                 img_info = coco_val.loadImgs(img_id)[0]
@@ -95,27 +125,25 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thres
                         print(f"Error loading image {img_path} for dimensions: {e}")
                         continue
 
-                # logits: (queries, num_classes+1), pred_boxes: (queries, 4) in cx,cy,w,h (normalized 0-1)
+                # outputs: logits (queries, num_classes+1) and pred_boxes (queries, 4) in cx,cy,w,h normalized
                 logits = outputs.logits[i]
                 pred_boxes = outputs.pred_boxes[i]
 
-                probs = logits.softmax(-1)  # per-query class probs (incl no-object)
-                scores, labels = probs.max(-1)  # best class per query
-                keep = labels != num_classes     # filter out no-object class
-
-                # apply keep mask
+                probs = logits.softmax(-1)
+                scores, labels = probs.max(-1)
+                keep = labels != num_classes  # drop "no object" class
                 scores = scores[keep]
                 labels = labels[keep]
                 boxes = pred_boxes[keep]
 
-                # optional score threshold (let COCOeval do its work; keep at 0.0)
+                # optional threshold (keep 0.0 for COCOeval)
                 if score_thresh > 0.0:
                     m = scores > score_thresh
                     scores = scores[m]
                     labels = labels[m]
                     boxes = boxes[m]
 
-                # top-k to cap results per image
+                # top-k keep
                 if scores.numel() > 0 and scores.numel() > topk:
                     topk_idx = torch.topk(scores, k=topk).indices
                     scores = scores[topk_idx]
@@ -123,27 +151,26 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thres
                     boxes = boxes[topk_idx]
 
                 if scores.numel() == 0:
-                    # no predictions for this image — continue; COCO can handle images with 0 preds
                     continue
 
-                # scale boxes to pixel space and convert [cx,cy,w,h] -> [x,y,w,h]
+                # scale to pixels & convert to [x,y,w,h]
                 boxes = boxes.cpu().numpy()
                 boxes = boxes * np.array([width, height, width, height], dtype=np.float32)
                 boxes[:, 0] = boxes[:, 0] - boxes[:, 2] / 2.0  # x
                 boxes[:, 1] = boxes[:, 1] - boxes[:, 3] / 2.0  # y
 
-                # clip to image bounds, and ensure positive width/height
-                boxes[:, 0] = np.clip(boxes[:, 0], 0, width - 1)
-                boxes[:, 1] = np.clip(boxes[:, 1], 0, height - 1)
-                boxes[:, 2] = np.clip(boxes[:, 2], 1e-6, width)   # avoid zero
-                boxes[:, 3] = np.clip(boxes[:, 3], 1e-6, height)  # avoid zero
+                # clip bounds & positive sizes
+                boxes[:, 0] = np.clip(boxes[:, 0], 0, max(0, width - 1))
+                boxes[:, 1] = np.clip(boxes[:, 1], 0, max(0, height - 1))
+                boxes[:, 2] = np.clip(boxes[:, 2], 1e-6, width)
+                boxes[:, 3] = np.clip(boxes[:, 3], 1e-6, height)
 
                 for box, score, label in zip(boxes, scores.cpu().numpy(), labels.cpu().numpy()):
                     results.append({
                         "image_id": img_id,
-                        "category_id": int(label) + 1,  # back to 1-based for COCO
+                        "category_id": int(label) + 1,  # back to COCO 1-indexed
                         "bbox": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
-                        "score": float(score)
+                        "score": float(score),
                     })
 
     results_file = "eval_predictions.json"
@@ -152,8 +179,7 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thres
 
     if len(results) == 0:
         print("Warning: no predictions produced. "
-              "Lower the score threshold, check weights, or ensure inputs match training preprocessing.")
-        # Return zeros instead of crashing
+              "Lower threshold or verify checkpoint/preprocessing.")
         return {"mAP": 0.0, "AP@50": 0.0, "AP@75": 0.0}
 
     coco_dt = coco_val.loadRes(results_file)
@@ -161,6 +187,7 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thres
     coco_eval.evaluate()
     coco_eval.accumulate()
     coco_eval.summarize()
+
     metrics = {
         "mAP": coco_eval.stats[0],
         "AP@50": coco_eval.stats[1],
@@ -168,45 +195,142 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thres
     }
     return metrics
 
+
+# -----------------------------
+# Visualization
+# -----------------------------
+def visualize_predictions(model, processor, coco_val, img_dir, num_images=3, score_thresh=0.3, random_sample=True):
+    """
+    Display images with:
+      - GT boxes in yellow (with 'GT: <label>')
+      - Predicted boxes in red (with 'Pred: <label> (<score>)')
+    """
+    model.eval()
+    cat_id_to_name = {c['id']: c['name'] for c in coco_val.dataset['categories']}
+
+    img_ids = coco_val.getImgIds()
+    if random_sample:
+        random.shuffle(img_ids)
+    img_ids = img_ids[:num_images]
+
+    for img_id in img_ids:
+        img_info = coco_val.loadImgs(img_id)[0]
+        img_path = os.path.join(img_dir, img_info['file_name'])
+
+        # Load image & size (always fresh to be safe)
+        image = Image.open(img_path).convert("RGB")
+        width, height = image.size
+
+        # Ground-truth annotations
+        ann_ids = coco_val.getAnnIds(imgIds=img_id)
+        anns = coco_val.loadAnns(ann_ids)
+
+        # Model forward
+        encoding = processor(images=image, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            outputs = model(**encoding)
+
+        # Take best class per query, drop "no-object" (last class)
+        probs = outputs.logits.softmax(-1)[0]
+        pred_boxes = outputs.pred_boxes[0]
+        scores, labels = probs[:, :-1].max(-1)  # ignore no-object column
+
+        keep = scores > score_thresh
+        scores = scores[keep]
+        labels = labels[keep]
+        boxes = pred_boxes[keep]
+
+        # Convert boxes: normalized [cx,cy,w,h] -> pixel [x,y,w,h]
+        boxes = boxes.cpu().numpy()
+        boxes = boxes * np.array([width, height, width, height], dtype=np.float32)
+        boxes[:, 0] -= boxes[:, 2] / 2.0
+        boxes[:, 1] -= boxes[:, 3] / 2.0
+
+        # Draw
+        fig, ax = plt.subplots(1, figsize=(8, 8))
+        ax.imshow(image)
+
+        # Ground truth in yellow
+        for ann in anns:
+            x, y, w, h = ann["bbox"]
+            rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor="yellow", facecolor="none")
+            ax.add_patch(rect)
+            gt_label = cat_id_to_name.get(ann["category_id"], str(ann["category_id"]))
+            ax.text(x, max(0, y - 5), f"GT: {gt_label}", color="yellow",
+                    fontsize=9, fontweight='bold', backgroundcolor="black")
+
+        # Predictions in red
+        for box, score, label in zip(boxes, scores, labels):
+            x, y, w, h = box
+            rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor="red", facecolor="none")
+            ax.add_patch(rect)
+            pred_label = cat_id_to_name.get(int(label) + 1, str(int(label) + 1))  # back to 1-indexed for names
+            ax.text(x, y + h + 10, f"Pred: {pred_label} ({float(score):.2f})", color="red",
+                    fontsize=9, fontweight='bold', backgroundcolor="black")
+
+        ax.set_title(f"Image ID: {img_id} - {img_info['file_name']}")
+        ax.axis("off")
+        plt.show()
+
+
+# -----------------------------
+# Main
+# -----------------------------
 def main():
     print(f"Current working directory: {os.getcwd()}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    weights_dir = "weights"
-    if not os.path.exists(weights_dir):
-        raise FileNotFoundError(f"Weights directory {weights_dir} not found.")
-    weight_files = [f for f in os.listdir(weights_dir) if f.startswith("epoch_") and f.endswith(".pth")]
+
+    # pick latest weights
+    if not os.path.exists(WEIGHTS_DIR):
+        raise FileNotFoundError(f"Weights directory {WEIGHTS_DIR} not found.")
+    weight_files = [f for f in os.listdir(WEIGHTS_DIR) if f.startswith("epoch_") and f.endswith(".pth")]
     if not weight_files:
-        raise FileNotFoundError(f"No weight files found in {weights_dir}")
+        raise FileNotFoundError(f"No weight files found in {WEIGHTS_DIR}")
     latest_weight = max(weight_files, key=lambda x: int(x.split("_")[1].split(".")[0]))
-    weights_path = os.path.join(weights_dir, latest_weight)
+    weights_path = os.path.join(WEIGHTS_DIR, latest_weight)
     print(f"Using latest weights: {weights_path}")
+
+    # load anno to get num classes
     with open(VAL_ANNO_FILE, 'r') as f:
         coco_data = json.load(f)
     num_classes = len(coco_data['categories'])
     print(f"Number of classes: {num_classes}")
+
+    # init processor & model
     print("Initializing processor and model...")
-    processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50", size=800)
+    processor = DetrImageProcessor.from_pretrained(MODEL_NAME, size=800)
     model = DetrForObjectDetection.from_pretrained(
-        "facebook/detr-resnet-50",
+        MODEL_NAME,
         num_labels=num_classes,
         ignore_mismatched_sizes=True
     ).to(device)
-    model.load_state_dict(torch.load(weights_path))
+    # load finetuned weights
+    model.load_state_dict(torch.load(weights_path, map_location=device))
+
+    # dataset & loader
     print("\nLoading test dataset...")
     val_dataset = SimpleCocoDataset(VAL_IMG_DIR, VAL_ANNO_FILE, processor)
     val_loader = DataLoader(
         val_dataset,
-        batch_size=2,
+        batch_size=BATCH_SIZE,
         shuffle=False,
         collate_fn=collate_fn,
-        num_workers=0
+        num_workers=NUM_WORKERS
     )
+
+    # evaluate
     print("\nEvaluating model on test set...")
     coco_val = COCO(VAL_ANNO_FILE)
-    eval_metrics = evaluate_model(model, val_loader, coco_val, device, num_classes)
+    eval_metrics = evaluate_model(model, val_loader, coco_val, device, num_classes,
+                                  score_thresh=SCORE_THRESH, topk=TOPK)
     print(f"Evaluation metrics: {eval_metrics}")
     print("Evaluation complete!")
+
+    # visualize a few predictions vs GT
+    print("\nVisualizing predictions vs ground truth...")
+    visualize_predictions(model, processor, coco_val, VAL_IMG_DIR, num_images=3, score_thresh=0.3, random_sample=True)
+
 
 if __name__ == "__main__":
     main()
