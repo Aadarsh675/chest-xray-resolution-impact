@@ -67,20 +67,26 @@ def collate_fn(batch):
     targets = [item[1] for item in batch]
     return pixel_values, targets
 
-def evaluate_model(model, dataloader, coco_val, device, num_classes):
+def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thresh=0.0, topk=100):
     model.eval()
     results = []
     with torch.no_grad():
         for pixel_values, targets in dataloader:
             pixel_values = pixel_values.to(device)
             outputs = model(pixel_values=pixel_values)
-            for i, target in enumerate(targets):
+
+            # batch size
+            B = pixel_values.shape[0]
+
+            for i in range(B):
+                # get corresponding target
+                target = targets[i]
                 img_id = target["image_id"].item()
                 img_info = coco_val.loadImgs(img_id)[0]
                 img_path = os.path.join(VAL_IMG_DIR, img_info['file_name'])
+
                 width = img_info.get("width")
                 height = img_info.get("height")
-                # Load image dimensions if missing in annotations
                 if width is None or height is None:
                     try:
                         image = Image.open(img_path).convert("RGB")
@@ -88,38 +94,68 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes):
                     except Exception as e:
                         print(f"Error loading image {img_path} for dimensions: {e}")
                         continue
-                # Proper post-processing: get scores and labels including no-obj
-                logits = outputs.logits[i]  # (queries, num_classes + 1)
-                pred_boxes = outputs.pred_boxes[i]  # (queries, 4)
-                probs = logits.softmax(-1)
-                scores, labels = probs.max(-1)
-                keep = labels != num_classes  # no-obj class
-                pred_scores = scores[keep]
-                pred_labels = labels[keep]
-                pred_boxes = pred_boxes[keep]
-                # Filter by score threshold
-                score_keep = pred_scores > 0.5
-                pred_scores = pred_scores[score_keep]
-                pred_labels = pred_labels[score_keep]
-                pred_boxes = pred_boxes[score_keep]
-                # Scale and convert boxes
-                if len(pred_boxes) > 0:
-                    boxes = pred_boxes.cpu().numpy()
-                    boxes = boxes * np.array([width, height, width, height])
-                    # Convert from [cx, cy, w, h] to [x, y, w, h]
-                    boxes[:, 0] -= boxes[:, 2] / 2
-                    boxes[:, 1] -= boxes[:, 3] / 2
-                    # Now boxes is [xmin, ymin, w, h]
-                    for box, score, label in zip(boxes, pred_scores.cpu().numpy(), pred_labels.cpu().numpy()):
-                        results.append({
-                            "image_id": img_id,
-                            "category_id": label + 1,
-                            "bbox": box.tolist(),
-                            "score": float(score)
-                        })
+
+                # logits: (queries, num_classes+1), pred_boxes: (queries, 4) in cx,cy,w,h (normalized 0-1)
+                logits = outputs.logits[i]
+                pred_boxes = outputs.pred_boxes[i]
+
+                probs = logits.softmax(-1)  # per-query class probs (incl no-object)
+                scores, labels = probs.max(-1)  # best class per query
+                keep = labels != num_classes     # filter out no-object class
+
+                # apply keep mask
+                scores = scores[keep]
+                labels = labels[keep]
+                boxes = pred_boxes[keep]
+
+                # optional score threshold (let COCOeval do its work; keep at 0.0)
+                if score_thresh > 0.0:
+                    m = scores > score_thresh
+                    scores = scores[m]
+                    labels = labels[m]
+                    boxes = boxes[m]
+
+                # top-k to cap results per image
+                if scores.numel() > 0 and scores.numel() > topk:
+                    topk_idx = torch.topk(scores, k=topk).indices
+                    scores = scores[topk_idx]
+                    labels = labels[topk_idx]
+                    boxes = boxes[topk_idx]
+
+                if scores.numel() == 0:
+                    # no predictions for this image — continue; COCO can handle images with 0 preds
+                    continue
+
+                # scale boxes to pixel space and convert [cx,cy,w,h] -> [x,y,w,h]
+                boxes = boxes.cpu().numpy()
+                boxes = boxes * np.array([width, height, width, height], dtype=np.float32)
+                boxes[:, 0] = boxes[:, 0] - boxes[:, 2] / 2.0  # x
+                boxes[:, 1] = boxes[:, 1] - boxes[:, 3] / 2.0  # y
+
+                # clip to image bounds, and ensure positive width/height
+                boxes[:, 0] = np.clip(boxes[:, 0], 0, width - 1)
+                boxes[:, 1] = np.clip(boxes[:, 1], 0, height - 1)
+                boxes[:, 2] = np.clip(boxes[:, 2], 1e-6, width)   # avoid zero
+                boxes[:, 3] = np.clip(boxes[:, 3], 1e-6, height)  # avoid zero
+
+                for box, score, label in zip(boxes, scores.cpu().numpy(), labels.cpu().numpy()):
+                    results.append({
+                        "image_id": img_id,
+                        "category_id": int(label) + 1,  # back to 1-based for COCO
+                        "bbox": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
+                        "score": float(score)
+                    })
+
     results_file = "eval_predictions.json"
     with open(results_file, "w") as f:
         json.dump(results, f)
+
+    if len(results) == 0:
+        print("Warning: no predictions produced. "
+              "Lower the score threshold, check weights, or ensure inputs match training preprocessing.")
+        # Return zeros instead of crashing
+        return {"mAP": 0.0, "AP@50": 0.0, "AP@75": 0.0}
+
     coco_dt = coco_val.loadRes(results_file)
     coco_eval = COCOeval(coco_val, coco_dt, "bbox")
     coco_eval.evaluate()
