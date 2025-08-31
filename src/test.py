@@ -7,14 +7,12 @@ from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from transformers import DetrImageProcessor, DetrForObjectDetection
 import numpy as np
-
 # Specify data paths
 DATA_DIR = "data"
 ANNO_DIR = os.path.join(DATA_DIR, "annotations")
 IMAGE_DIR = os.path.join(DATA_DIR, "images")
 VAL_ANNO_FILE = os.path.join(ANNO_DIR, "test_annotations_coco.json")
 VAL_IMG_DIR = os.path.join(IMAGE_DIR, "test")
-
 class SimpleCocoDataset(Dataset):
     def __init__(self, img_folder, anno_file, processor):
         self.coco = COCO(anno_file)
@@ -61,23 +59,18 @@ class SimpleCocoDataset(Dataset):
             "image_id": torch.tensor([img_id], dtype=torch.int64)
         }
         return pixel_values, target
-
 def collate_fn(batch):
     pixel_values = torch.stack([item[0] for item in batch])
     targets = [item[1] for item in batch]
     return pixel_values, targets
-
-def evaluate_model(model, dataloader, coco_val, device):
+def evaluate_model(model, dataloader, coco_val, device, num_classes):
     model.eval()
     results = []
     with torch.no_grad():
         for pixel_values, targets in dataloader:
             pixel_values = pixel_values.to(device)
             outputs = model(pixel_values=pixel_values)
-            orig_target_sizes = torch.tensor([t["image_id"].shape[0] for t in targets], device=device)
-            pred_boxes = outputs.logits.softmax(-1)[..., :-1].max(-1).indices
-            pred_scores = outputs.logits.softmax(-1)[..., :-1].max(-1).values
-            for i, (boxes, scores, target) in enumerate(zip(outputs.pred_boxes, pred_scores, targets)):
+            for i, target in enumerate(targets):
                 img_id = target["image_id"].item()
                 img_info = coco_val.loadImgs(img_id)[0]
                 width = img_info.get("width")
@@ -85,12 +78,29 @@ def evaluate_model(model, dataloader, coco_val, device):
                 if width is None or height is None:
                     print(f"Error: Missing dimensions for img_id {img_id}. img_info: {img_info}")
                     continue
-                boxes = boxes.cpu().numpy()
-                boxes = boxes * np.array([width, height, width, height])
-                boxes[:, [0, 2]] = boxes[:, [0, 2]] - boxes[:, [2, 2]] / 2
-                boxes[:, [1, 3]] = boxes[:, [1, 3]] - boxes[:, [3, 3]] / 2
-                for box, score, label in zip(boxes, scores.cpu().numpy(), pred_boxes[i].cpu().numpy()):
-                    if score > 0.5:
+                # Proper post-processing: get scores and labels including no-obj
+                logits = outputs.logits[i]  # (queries, num_classes + 1)
+                pred_boxes = outputs.pred_boxes[i]  # (queries, 4)
+                probs = logits.softmax(-1)
+                scores, labels = probs.max(-1)
+                keep = labels != num_classes  # no-obj class
+                pred_scores = scores[keep]
+                pred_labels = labels[keep]
+                pred_boxes = pred_boxes[keep]
+                # Filter by score threshold
+                score_keep = pred_scores > 0.5
+                pred_scores = pred_scores[score_keep]
+                pred_labels = pred_labels[score_keep]
+                pred_boxes = pred_boxes[score_keep]
+                # Scale and convert boxes
+                if len(pred_boxes) > 0:
+                    boxes = pred_boxes.cpu().numpy()
+                    boxes = boxes * np.array([width, height, width, height])
+                    # Convert from [cx, cy, w, h] to [x, y, w, h]
+                    boxes[:, 0] -= boxes[:, 2] / 2
+                    boxes[:, 1] -= boxes[:, 3] / 2
+                    # Now boxes is [xmin, ymin, w, h]
+                    for box, score, label in zip(boxes, pred_scores.cpu().numpy(), pred_labels.cpu().numpy()):
                         results.append({
                             "image_id": img_id,
                             "category_id": label + 1,
@@ -111,30 +121,31 @@ def evaluate_model(model, dataloader, coco_val, device):
         "AP@75": coco_eval.stats[2],
     }
     return metrics
-
 def main():
     print(f"Current working directory: {os.getcwd()}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
-    model_dir = "./detr_final"
-    if not os.path.exists(model_dir):
-        print(f"Model directory {model_dir} not found. Checking for checkpoints...")
-        checkpoint_dirs = [d for d in os.listdir("./checkpoints") if d.startswith("epoch_")]
-        if checkpoint_dirs:
-            latest_checkpoint = max(checkpoint_dirs, key=lambda x: int(x.split("_")[1]))
-            model_dir = os.path.join("./checkpoints", latest_checkpoint)
-            print(f"Using latest checkpoint: {model_dir}")
-        else:
-            raise FileNotFoundError(f"No model found in {model_dir} and no checkpoints available in ./checkpoints")
-    if not os.path.exists(os.path.join(model_dir, "preprocessor_config.json")):
-        raise FileNotFoundError(f"preprocessor_config.json not found in {model_dir}")
+    weights_dir = "weights"
+    if not os.path.exists(weights_dir):
+        raise FileNotFoundError(f"Weights directory {weights_dir} not found.")
+    weight_files = [f for f in os.listdir(weights_dir) if f.startswith("epoch_") and f.endswith(".pth")]
+    if not weight_files:
+        raise FileNotFoundError(f"No weight files found in {weights_dir}")
+    latest_weight = max(weight_files, key=lambda x: int(x.split("_")[1].split(".")[0]))
+    weights_path = os.path.join(weights_dir, latest_weight)
+    print(f"Using latest weights: {weights_path}")
     with open(VAL_ANNO_FILE, 'r') as f:
         coco_data = json.load(f)
     num_classes = len(coco_data['categories'])
     print(f"Number of classes: {num_classes}")
-    print(f"Loading processor and model from {model_dir}...")
-    processor = DetrImageProcessor.from_pretrained(model_dir)
-    model = DetrForObjectDetection.from_pretrained(model_dir).to(device)
+    print("Initializing processor and model...")
+    processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50", size=800)
+    model = DetrForObjectDetection.from_pretrained(
+        "facebook/detr-resnet-50",
+        num_labels=num_classes,
+        ignore_mismatched_sizes=True
+    ).to(device)
+    model.load_state_dict(torch.load(weights_path))
     print("\nLoading test dataset...")
     val_dataset = SimpleCocoDataset(VAL_IMG_DIR, VAL_ANNO_FILE, processor)
     val_loader = DataLoader(
@@ -146,9 +157,8 @@ def main():
     )
     print("\nEvaluating model on test set...")
     coco_val = COCO(VAL_ANNO_FILE)
-    eval_metrics = evaluate_model(model, val_loader, coco_val, device)
+    eval_metrics = evaluate_model(model, val_loader, coco_val, device, num_classes)
     print(f"Evaluation metrics: {eval_metrics}")
     print("Evaluation complete!")
-
 if __name__ == "__main__":
     main()
