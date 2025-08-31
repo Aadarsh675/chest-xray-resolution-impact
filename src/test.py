@@ -199,17 +199,28 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thres
 # -----------------------------
 # Visualization
 # -----------------------------
-def visualize_predictions(model, processor, coco_val, img_dir, num_images=3, score_thresh=0.3, random_sample=True):
+def visualize_predictions(
+    model,
+    processor,
+    coco_val,
+    img_dir,
+    num_images=3,
+    score_thresh=0.0,   # keep 0.0 so we don't drop everything
+    topk=5,             # show up to K predictions per image
+    random_sample=True,
+    use_grayscale=True  # x-rays look nicer in grayscale
+):
     """
-    Display images with:
-      - GT boxes in yellow (with 'GT: <label>')
-      - Predicted boxes in red (with 'Pred: <label> (<score>)')
+    Draw GT boxes (yellow) + labels and Pred boxes (red) + labels+scores.
+    We keep a low threshold and cap to top-K so you always see predictions.
     """
     model.eval()
+    device = next(model.parameters()).device
     cat_id_to_name = {c['id']: c['name'] for c in coco_val.dataset['categories']}
 
     img_ids = coco_val.getImgIds()
     if random_sample:
+        import random
         random.shuffle(img_ids)
     img_ids = img_ids[:num_images]
 
@@ -217,61 +228,73 @@ def visualize_predictions(model, processor, coco_val, img_dir, num_images=3, sco
         img_info = coco_val.loadImgs(img_id)[0]
         img_path = os.path.join(img_dir, img_info['file_name'])
 
-        # Load image & size (always fresh to be safe)
+        # load image and size
         image = Image.open(img_path).convert("RGB")
         width, height = image.size
 
-        # Ground-truth annotations
+        # ---- Ground truth
         ann_ids = coco_val.getAnnIds(imgIds=img_id)
         anns = coco_val.loadAnns(ann_ids)
 
-        # Model forward
-        encoding = processor(images=image, return_tensors="pt").to(model.device)
+        # ---- Model forward
+        enc = processor(images=image, return_tensors="pt").to(device)
         with torch.no_grad():
-            outputs = model(**encoding)
+            outputs = model(**enc)
+        # logits: (1, queries, num_classes+1), pred_boxes: (1, queries, 4) in cx,cy,w,h normalized
+        logits = outputs.logits[0]          # (queries, C+1)
+        pred_boxes = outputs.pred_boxes[0]  # (queries, 4)
 
-        # Take best class per query, drop "no-object" (last class)
-        probs = outputs.logits.softmax(-1)[0]
-        pred_boxes = outputs.pred_boxes[0]
-        scores, labels = probs[:, :-1].max(-1)  # ignore no-object column
+        # drop the "no-object" column (last one)
+        class_scores = logits.softmax(-1)[:, :-1]  # (queries, C)
+        best_scores, best_labels = class_scores.max(-1)  # per-query best class & score
 
-        keep = scores > score_thresh
-        scores = scores[keep]
-        labels = labels[keep]
-        boxes = pred_boxes[keep]
+        # threshold filter (keep 0.0 here) + take top-K
+        keep = best_scores > score_thresh
+        best_scores = best_scores[keep]
+        best_labels = best_labels[keep]
+        pred_boxes = pred_boxes[keep]
 
-        # Convert boxes: normalized [cx,cy,w,h] -> pixel [x,y,w,h]
-        boxes = boxes.cpu().numpy()
+        if best_scores.numel() > topk:
+            top_idx = torch.topk(best_scores, k=topk).indices
+            best_scores = best_scores[top_idx]
+            best_labels = best_labels[top_idx]
+            pred_boxes = pred_boxes[top_idx]
+
+        # convert boxes: normalized [cx,cy,w,h] -> pixel [x,y,w,h]
+        boxes = pred_boxes.cpu().numpy()
         boxes = boxes * np.array([width, height, width, height], dtype=np.float32)
         boxes[:, 0] -= boxes[:, 2] / 2.0
         boxes[:, 1] -= boxes[:, 3] / 2.0
 
-        # Draw
+        # ---- Plot
         fig, ax = plt.subplots(1, figsize=(8, 8))
-        ax.imshow(image)
+        if use_grayscale:
+            ax.imshow(image, cmap="gray")
+        else:
+            ax.imshow(image)
 
-        # Ground truth in yellow
+        # GT in yellow
         for ann in anns:
             x, y, w, h = ann["bbox"]
-            rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor="yellow", facecolor="none")
-            ax.add_patch(rect)
+            ax.add_patch(patches.Rectangle((x, y), w, h, linewidth=2, edgecolor="yellow", facecolor="none"))
             gt_label = cat_id_to_name.get(ann["category_id"], str(ann["category_id"]))
             ax.text(x, max(0, y - 5), f"GT: {gt_label}", color="yellow",
-                    fontsize=9, fontweight='bold', backgroundcolor="black")
+                    fontsize=10, fontweight='bold', backgroundcolor="black")
 
-        # Predictions in red
-        for box, score, label in zip(boxes, scores, labels):
-            x, y, w, h = box
-            rect = patches.Rectangle((x, y), w, h, linewidth=2, edgecolor="red", facecolor="none")
-            ax.add_patch(rect)
-            pred_label = cat_id_to_name.get(int(label) + 1, str(int(label) + 1))  # back to 1-indexed for names
-            ax.text(x, y + h + 10, f"Pred: {pred_label} ({float(score):.2f})", color="red",
-                    fontsize=9, fontweight='bold', backgroundcolor="black")
+        # Predictions in red (labels are 0-indexed here; map back to 1-based for names)
+        for (x, y, w, h), sc, lb in zip(boxes, best_scores.cpu().numpy(), best_labels.cpu().numpy()):
+            ax.add_patch(patches.Rectangle((x, y), w, h, linewidth=2, edgecolor="red", facecolor="none"))
+            pred_name = cat_id_to_name.get(int(lb) + 1, str(int(lb) + 1))
+            ax.text(x, y + h + 12, f"Pred: {pred_name} ({float(sc):.2f})", color="red",
+                    fontsize=10, fontweight='bold', backgroundcolor="black")
 
         ax.set_title(f"Image ID: {img_id} - {img_info['file_name']}")
         ax.axis("off")
+        # quick legend
+        ax.plot([], [], color="yellow", linewidth=2, label="GT")
+        ax.plot([], [], color="red", linewidth=2, label="Pred")
+        ax.legend(loc="upper right")
         plt.show()
-
 
 # -----------------------------
 # Main
