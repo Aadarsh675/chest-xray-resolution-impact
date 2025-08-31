@@ -44,7 +44,6 @@ class SimpleCocoDataset(Dataset):
       
         # Get annotations
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
-        print("ann_ids: ", ann_ids)
         anns = self.coco.loadAnns(ann_ids)
       
         # Convert annotations to DETR format
@@ -137,6 +136,7 @@ def main():
     # Get number of classes
     num_classes = len(coco_data['categories'])
     print(f"Number of classes: {num_classes}")
+    print("Categories: ", coco_data['categories'])
   
     # Initialize processor and model
     processor = DetrImageProcessor.from_pretrained("facebook/detr-resnet-50", size=800)
