@@ -44,7 +44,7 @@ class SimpleCocoDataset(Dataset):
       
         # Get annotations
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
-        print(ann_ids)
+        print("ann_ids: " + ann_ids)
         anns = self.coco.loadAnns(ann_ids)
       
         # Convert annotations to DETR format
