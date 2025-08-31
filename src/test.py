@@ -14,7 +14,6 @@ from transformers import DetrImageProcessor, DetrForObjectDetection
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 
 
@@ -35,7 +34,7 @@ NUM_WORKERS = 0
 TOPK = 100         # max predictions per image to keep for evaluation
 SCORE_THRESH = 0.0 # keep 0.0 so COCOeval handles thresholds
 
-# The 8 diseases requested for the disease confusion matrix
+# disease classes (exactly these 8 for the confusion matrix)
 DISEASE_CLASSES = [
     "Atelectasis",
     "Cardiomegaly",
@@ -47,10 +46,6 @@ DISEASE_CLASSES = [
     "Mass",
 ]
 
-# Location/size bins for bbox confusion matrices
-LOC_BINS = ["TL","TC","TR","ML","MC","MR","BL","BC","BR"]  # 3x3 grid by center
-SIZE_BINS = ["Small","Medium","Large"]  # by area fraction
-
 
 # -----------------------------
 # Dataset
@@ -60,7 +55,7 @@ class SimpleCocoDataset(Dataset):
         self.coco = COCO(anno_file)
         self.img_folder = img_folder
         self.processor = processor
-        # Use only images that have at least one annotation
+        # Only images with at least one annotation
         self.ids = [img_id for img_id in self.coco.imgs.keys()
                     if len(self.coco.getAnnIds(imgIds=img_id)) > 0]
         print(f"Found {len(self.ids)} images with annotations")
@@ -95,7 +90,7 @@ class SimpleCocoDataset(Dataset):
             w_n = max(0, min(1, w_n))
             h_n = max(0, min(1, h_n))
             boxes.append([cx, cy, w_n, h_n])
-            labels.append(ann['category_id'] - 1)  # make 0-indexed
+            labels.append(ann['category_id'] - 1)  # 0-indexed
 
         encoding = self.processor(images=image, return_tensors="pt")
         pixel_values = encoding["pixel_values"].squeeze(0)
@@ -115,7 +110,7 @@ def collate_fn(batch):
 
 
 # -----------------------------
-# Utility: IoU, binning
+# Utilities
 # -----------------------------
 def box_xywh_to_xyxy(box_xywh):
     x, y, w, h = box_xywh
@@ -137,25 +132,9 @@ def iou_xyxy(a, b):
     union = area_a + area_b - inter + 1e-9
     return inter / union
 
-def loc_bin_from_center(cx, cy, W, H):
-    """Return one of the 3x3 bins based on center thirds."""
-    x_bin = "L" if cx < W/3 else ("C" if cx < 2*W/3 else "R")
-    y_bin = "T" if cy < H/3 else ("M" if cy < 2*H/3 else "B")
-    return y_bin + x_bin  # e.g., "TL","MC",...
-
-def size_bin_from_area(w, h, W, H):
-    """Area fraction bins: S < 5%, M < 20%, else L."""
-    frac = (w * h) / (W * H + 1e-9)
-    if frac < 0.05:
-        return "Small"
-    elif frac < 0.20:
-        return "Medium"
-    else:
-        return "Large"
-
 
 # -----------------------------
-# Evaluation
+# Evaluation (COCO metrics)
 # -----------------------------
 def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thresh=SCORE_THRESH, topk=TOPK):
     model.eval()
@@ -252,6 +231,141 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes, score_thres
         "AP@75": coco_eval.stats[2],
     }
     return metrics
+
+
+# -----------------------------
+# Disease confusion + BBox diffs
+# -----------------------------
+def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_thresh=0.1, max_images=None):
+    """
+    - Builds and shows the confusion matrix for the 8 specified disease classes.
+      GT label = first annotation's category on the image.
+      Pred label = top-score predicted label on the image.
+      Samples where either side isn't in the 8 classes are skipped.
+    - Computes average bbox location & size differences across matched GT–prediction pairs:
+        * Location error: mean absolute dx, dy of box centers (pixels) and normalized (wrt image W/H)
+        * Size error: mean absolute dw, dh (pixels) and normalized (wrt image W/H)
+      Matching by best IoU >= iou_thresh. Unmatched GT boxes are skipped.
+    """
+    device = next(model.parameters()).device
+    cat_id_to_name = {c['id']: c['name'] for c in coco_val.dataset['categories']}
+
+    disease_to_idx = {name: i for i, name in enumerate(DISEASE_CLASSES)}
+    y_true_dz, y_pred_dz = [], []
+
+    # Accumulators for bbox differences
+    loc_dx_abs_pix, loc_dy_abs_pix = [], []
+    loc_dx_abs_norm, loc_dy_abs_norm = [], []
+    size_dw_abs_pix, size_dh_abs_pix = [], []
+    size_dw_abs_norm, size_dh_abs_norm = [], []
+
+    img_ids = coco_val.getImgIds()
+    if max_images is not None:
+        img_ids = img_ids[:max_images]
+
+    for img_id in img_ids:
+        img_info = coco_val.loadImgs(img_id)[0]
+        img_path = os.path.join(img_dir, img_info['file_name'])
+        image = Image.open(img_path).convert("RGB")
+        W, H = image.size
+
+        ann_ids = coco_val.getAnnIds(imgIds=img_id)
+        anns = coco_val.loadAnns(ann_ids)
+        if len(anns) == 0:
+            continue
+
+        # forward
+        enc = processor(images=image, return_tensors="pt").to(device)
+        with torch.no_grad():
+            outputs = model(**enc)
+
+        # post-process predictions (pixel space)
+        target_sizes = torch.tensor([[H, W]], device=device)
+        processed = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.0)[0]
+        pred_boxes_xyxy = processed["boxes"].cpu().numpy()   # [x1,y1,x2,y2]
+        pred_scores = processed["scores"].cpu().numpy()
+        pred_labels = processed["labels"].cpu().numpy()      # 0-based class idx
+
+        # --------- Disease confusion (image-level) ---------
+        gt_name = cat_id_to_name.get(anns[0]["category_id"])
+        if len(pred_scores) > 0:
+            j = int(np.argmax(pred_scores))
+            pred_name = cat_id_to_name.get(int(pred_labels[j]) + 1)  # map 0->1-index
+        else:
+            pred_name = None
+
+        if gt_name in disease_to_idx and pred_name in disease_to_idx:
+            y_true_dz.append(disease_to_idx[gt_name])
+            y_pred_dz.append(disease_to_idx[pred_name])
+
+        # --------- BBox differences (matched pairs) ---------
+        if len(pred_boxes_xyxy) == 0:
+            continue
+
+        # prepare pred xywh for centers and sizes
+        px1, py1, px2, py2 = pred_boxes_xyxy[:,0], pred_boxes_xyxy[:,1], pred_boxes_xyxy[:,2], pred_boxes_xyxy[:,3]
+        pw = np.maximum(1e-6, px2 - px1)
+        ph = np.maximum(1e-6, py2 - py1)
+        pred_xywh = np.stack([px1, py1, pw, ph], axis=1)
+
+        used_pred = set()
+        for ann in anns:
+            gx, gy, gw, gh = ann["bbox"]
+            gt_xyxy = box_xywh_to_xyxy([gx, gy, gw, gh])
+            ious = iou_xyxy(gt_xyxy, pred_boxes_xyxy)
+            j = int(np.argmax(ious))
+            if ious[j] < iou_thresh or j in used_pred:
+                continue
+            used_pred.add(j)
+
+            # centers
+            g_cx, g_cy = gx + gw/2.0, gy + gh/2.0
+            p_cx, p_cy = pred_xywh[j,0] + pred_xywh[j,2]/2.0, pred_xywh[j,1] + pred_xywh[j,3]/2.0
+
+            # abs diffs (pixels)
+            dx_pix = abs(g_cx - p_cx)
+            dy_pix = abs(g_cy - p_cy)
+            # normalized
+            dx_norm = dx_pix / (W + 1e-9)
+            dy_norm = dy_pix / (H + 1e-9)
+
+            loc_dx_abs_pix.append(dx_pix)
+            loc_dy_abs_pix.append(dy_pix)
+            loc_dx_abs_norm.append(dx_norm)
+            loc_dy_abs_norm.append(dy_norm)
+
+            # size diffs
+            dw_pix = abs(gw - pred_xywh[j,2])
+            dh_pix = abs(gh - pred_xywh[j,3])
+            dw_norm = dw_pix / (W + 1e-9)
+            dh_norm = dh_pix / (H + 1e-9)
+
+            size_dw_abs_pix.append(dw_pix)
+            size_dh_abs_pix.append(dh_pix)
+            size_dw_abs_norm.append(dw_norm)
+            size_dh_abs_norm.append(dh_norm)
+
+    # --- Plot disease confusion matrix ---
+    if len(y_true_dz) > 0:
+        cm_dz = confusion_matrix(y_true_dz, y_pred_dz, labels=list(range(len(DISEASE_CLASSES))))
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm_dz, display_labels=DISEASE_CLASSES)
+        fig, ax = plt.subplots(figsize=(8, 7))
+        disp.plot(ax=ax, xticks_rotation=45, cmap="Blues", colorbar=False)
+        ax.set_title("Confusion Matrix — Disease (Image-level)")
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("Disease confusion matrix: not enough samples in the specified 8 classes.")
+
+    # --- Print average bbox differences ---
+    def safe_mean(arr):
+        return float(np.mean(arr)) if len(arr) > 0 else float("nan")
+
+    print("\nAverage bounding-box differences over matched GT–prediction pairs:")
+    print(f"  Location | mean |dx| (pixels): {safe_mean(loc_dx_abs_pix):.2f}   |dy| (pixels): {safe_mean(loc_dy_abs_pix):.2f}")
+    print(f"           | mean |dx| (norm W): {safe_mean(loc_dx_abs_norm):.4f}  |dy| (norm H): {safe_mean(loc_dy_abs_norm):.4f}")
+    print(f"  Size     | mean |dw| (pixels): {safe_mean(size_dw_abs_pix):.2f}  |dh| (pixels): {safe_mean(size_dh_abs_pix):.2f}")
+    print(f"           | mean |dw| (norm W): {safe_mean(size_dw_abs_norm):.4f} |dh| (norm H): {safe_mean(size_dh_abs_norm):.4f}")
 
 
 # -----------------------------
@@ -362,7 +476,7 @@ def visualize_predictions(
         for (bx, by, bw, bh), sc, lb in zip(boxes_xywh, scores, labels):
             ax.add_patch(patches.Rectangle((bx, by), bw, bh, linewidth=2,
                                            edgecolor="red", facecolor="none", zorder=3))
-            pred_name = cat_id_to_name.get(int(lb) + 1, str(int(lb) + 1))  # map 0->category id 1
+            pred_name = cat_id_to_name.get(int(lb) + 1, str(int(lb) + 1))  # map 0->1-index for names
             ax.text(bx, min(H - 1, by + bh + 12), f"Pred: {pred_name} ({sc:.2f})",
                     color="red", fontsize=10, fontweight="bold",
                     backgroundcolor="black", zorder=4)
@@ -373,152 +487,6 @@ def visualize_predictions(
         ax.plot([], [], color="red", linewidth=2, label="Pred box")
         ax.legend(loc="upper right")
         plt.show()
-
-
-# -----------------------------
-# Confusion matrices (disease, bbox location, bbox size)
-# -----------------------------
-def build_confusion_matrices(model, processor, coco_val, img_dir, max_images=None, iou_thresh=0.1):
-    """
-    Creates:
-      1) Disease confusion matrix (8 classes). One GT label per image (first ann),
-         vs top-score predicted label per image. Skips if either side not in the 8 classes.
-      2) BBox Location confusion (9 bins). Matches each GT bbox to best-IoU pred (>= iou_thresh),
-         compares location bins.
-      3) BBox Size confusion (3 bins). Same matched pairs, compares size bins.
-    """
-    device = next(model.parameters()).device
-    cat_id_to_name = {c['id']: c['name'] for c in coco_val.dataset['categories']}
-    name_to_cat_id = {v: k for k, v in cat_id_to_name.items()}
-
-    # disease indices (exactly these 8)
-    disease_to_idx = {name: i for i, name in enumerate(DISEASE_CLASSES)}
-
-    # accumulators
-    y_true_dz = []
-    y_pred_dz = []
-
-    y_true_loc = []
-    y_pred_loc = []
-
-    y_true_sz = []
-    y_pred_sz = []
-
-    img_ids = coco_val.getImgIds()
-    if max_images is not None:
-        img_ids = img_ids[:max_images]
-
-    for img_id in img_ids:
-        img_info = coco_val.loadImgs(img_id)[0]
-        img_path = os.path.join(img_dir, img_info['file_name'])
-        image = Image.open(img_path).convert("RGB")
-        W, H = image.size
-
-        ann_ids = coco_val.getAnnIds(imgIds=img_id)
-        anns = coco_val.loadAnns(ann_ids)
-        if len(anns) == 0:
-            continue
-
-        # ---- forward
-        enc = processor(images=image, return_tensors="pt").to(device)
-        with torch.no_grad():
-            outputs = model(**enc)
-
-        # post-process preds at 0.0 so we can keep many, then cap later
-        target_sizes = torch.tensor([[H, W]], device=device)
-        processed = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=0.0)[0]
-        pred_boxes_xyxy = processed["boxes"].cpu().numpy()   # [x1,y1,x2,y2]
-        pred_scores = processed["scores"].cpu().numpy()
-        pred_labels = processed["labels"].cpu().numpy()      # 0-based class idx
-
-        # ===== 1) Disease confusion (image-level)
-        # GT label: take the first annotation's category name
-        gt_cat_id = anns[0]["category_id"]
-        gt_name = cat_id_to_name.get(gt_cat_id)
-        # Pred label: take the single best-score predicted name
-        if len(pred_scores) > 0:
-            j = int(np.argmax(pred_scores))
-            pred_name = cat_id_to_name.get(int(pred_labels[j]) + 1)  # map 0->1-based
-        else:
-            pred_name = None
-
-        # Only include if both are in the requested 8 classes
-        if gt_name in disease_to_idx and pred_name in disease_to_idx:
-            y_true_dz.append(disease_to_idx[gt_name])
-            y_pred_dz.append(disease_to_idx[pred_name])
-
-        # ===== 2&3) BBox confusion (matched pairs by IoU)
-        if len(pred_boxes_xyxy) == 0:
-            continue
-
-        # compute pred xywh for binning later
-        pw = np.maximum(1e-6, pred_boxes_xyxy[:,2] - pred_boxes_xyxy[:,0])
-        ph = np.maximum(1e-6, pred_boxes_xyxy[:,3] - pred_boxes_xyxy[:,1])
-        px = pred_boxes_xyxy[:,0]
-        py = pred_boxes_xyxy[:,1]
-        pred_xywh = np.stack([px, py, pw, ph], axis=1)
-
-        used_pred = set()
-        for ann in anns:
-            gx, gy, gw, gh = ann["bbox"]
-            gt_xyxy = box_xywh_to_xyxy([gx, gy, gw, gh])
-            ious = iou_xyxy(gt_xyxy, pred_boxes_xyxy)
-            j = int(np.argmax(ious))
-            if ious[j] < iou_thresh or j in used_pred:
-                continue  # no match for this GT
-            used_pred.add(j)
-
-            # bins
-            g_cx, g_cy = gx + gw/2.0, gy + gh/2.0
-            p_cx, p_cy = pred_xywh[j,0] + pred_xywh[j,2]/2.0, pred_xywh[j,1] + pred_xywh[j,3]/2.0
-            gt_loc = loc_bin_from_center(g_cx, g_cy, W, H)
-            pr_loc = loc_bin_from_center(p_cx, p_cy, W, H)
-            gt_sz = size_bin_from_area(gw, gh, W, H)
-            pr_sz = size_bin_from_area(pred_xywh[j,2], pred_xywh[j,3], W, H)
-
-            if gt_loc in LOC_BINS and pr_loc in LOC_BINS:
-                y_true_loc.append(LOC_BINS.index(gt_loc))
-                y_pred_loc.append(LOC_BINS.index(pr_loc))
-            if gt_sz in SIZE_BINS and pr_sz in SIZE_BINS:
-                y_true_sz.append(SIZE_BINS.index(gt_sz))
-                y_pred_sz.append(SIZE_BINS.index(pr_sz))
-
-    # ----- Plot confusion matrices
-    # Disease (8x8)
-    if len(y_true_dz) > 0:
-        cm_dz = confusion_matrix(y_true_dz, y_pred_dz, labels=list(range(len(DISEASE_CLASSES))))
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm_dz, display_labels=DISEASE_CLASSES)
-        fig, ax = plt.subplots(figsize=(8, 7))
-        disp.plot(ax=ax, xticks_rotation=45, cmap="Blues", colorbar=False)
-        ax.set_title("Confusion Matrix — Disease (Image-level)")
-        plt.tight_layout()
-        plt.show()
-    else:
-        print("Disease confusion matrix: not enough matched samples within the specified 8 classes.")
-
-    # Location (9x9)
-    if len(y_true_loc) > 0:
-        cm_loc = confusion_matrix(y_true_loc, y_pred_loc, labels=list(range(len(LOC_BINS))))
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm_loc, display_labels=LOC_BINS)
-        fig, ax = plt.subplots(figsize=(7, 7))
-        disp.plot(ax=ax, xticks_rotation=45, cmap="Oranges", colorbar=False)
-        ax.set_title("Confusion Matrix — BBox Location (3×3 grid)")
-        plt.tight_layout()
-        plt.show()
-    else:
-        print("BBox location confusion matrix: no matched GT–prediction pairs (IoU threshold too high?).")
-
-    # Size (3x3)
-    if len(y_true_sz) > 0:
-        cm_sz = confusion_matrix(y_true_sz, y_pred_sz, labels=list(range(len(SIZE_BINS))))
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm_sz, display_labels=SIZE_BINS)
-        fig, ax = plt.subplots(figsize=(6, 6))
-        disp.plot(ax=ax, xticks_rotation=0, cmap="Greens", colorbar=False)
-        ax.set_title("Confusion Matrix — BBox Size (area fraction)")
-        plt.tight_layout()
-        plt.show()
-    else:
-        print("BBox size confusion matrix: no matched GT–prediction pairs.")
 
 
 # -----------------------------
@@ -575,9 +543,9 @@ def main():
     print(f"Evaluation metrics: {eval_metrics}")
     print("Evaluation complete!")
 
-    # -------- Confusion matrices (BEFORE visual examples) --------
-    print("\nBuilding confusion matrices...")
-    build_confusion_matrices(model, processor, coco_val, VAL_IMG_DIR, max_images=None, iou_thresh=0.1)
+    # -------- Disease confusion + BBox diff metrics (BEFORE visual examples) --------
+    print("\nBuilding disease confusion matrix and bbox difference metrics...")
+    disease_confusion_and_bbox_diffs(model, processor, coco_val, VAL_IMG_DIR, iou_thresh=0.1, max_images=None)
 
     # -------- Visualize a few predictions vs GT --------
     print("\nVisualizing predictions vs ground truth...")
