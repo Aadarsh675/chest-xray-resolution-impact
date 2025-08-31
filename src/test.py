@@ -7,19 +7,21 @@ from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from transformers import DetrImageProcessor, DetrForObjectDetection
 import numpy as np
+
 # Specify data paths
 DATA_DIR = "data"
 ANNO_DIR = os.path.join(DATA_DIR, "annotations")
 IMAGE_DIR = os.path.join(DATA_DIR, "images")
 VAL_ANNO_FILE = os.path.join(ANNO_DIR, "test_annotations_coco.json")
 VAL_IMG_DIR = os.path.join(IMAGE_DIR, "test")
+
 class SimpleCocoDataset(Dataset):
     def __init__(self, img_folder, anno_file, processor):
         self.coco = COCO(anno_file)
         self.img_folder = img_folder
         self.processor = processor
         self.ids = [img_id for img_id in self.coco.imgs.keys()
-                   if len(self.coco.getAnnIds(imgIds=img_id)) > 0]
+                    if len(self.coco.getAnnIds(imgIds=img_id)) > 0]
         print(f"Found {len(self.ids)} images with annotations")
    
     def __len__(self):
@@ -59,10 +61,12 @@ class SimpleCocoDataset(Dataset):
             "image_id": torch.tensor([img_id], dtype=torch.int64)
         }
         return pixel_values, target
+
 def collate_fn(batch):
     pixel_values = torch.stack([item[0] for item in batch])
     targets = [item[1] for item in batch]
     return pixel_values, targets
+
 def evaluate_model(model, dataloader, coco_val, device, num_classes):
     model.eval()
     results = []
@@ -73,11 +77,17 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes):
             for i, target in enumerate(targets):
                 img_id = target["image_id"].item()
                 img_info = coco_val.loadImgs(img_id)[0]
+                img_path = os.path.join(VAL_IMG_DIR, img_info['file_name'])
                 width = img_info.get("width")
                 height = img_info.get("height")
+                # Load image dimensions if missing in annotations
                 if width is None or height is None:
-                    print(f"Error: Missing dimensions for img_id {img_id}. img_info: {img_info}")
-                    continue
+                    try:
+                        image = Image.open(img_path).convert("RGB")
+                        width, height = image.size
+                    except Exception as e:
+                        print(f"Error loading image {img_path} for dimensions: {e}")
+                        continue
                 # Proper post-processing: get scores and labels including no-obj
                 logits = outputs.logits[i]  # (queries, num_classes + 1)
                 pred_boxes = outputs.pred_boxes[i]  # (queries, 4)
@@ -121,6 +131,7 @@ def evaluate_model(model, dataloader, coco_val, device, num_classes):
         "AP@75": coco_eval.stats[2],
     }
     return metrics
+
 def main():
     print(f"Current working directory: {os.getcwd()}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -160,5 +171,6 @@ def main():
     eval_metrics = evaluate_model(model, val_loader, coco_val, device, num_classes)
     print(f"Evaluation metrics: {eval_metrics}")
     print("Evaluation complete!")
+
 if __name__ == "__main__":
     main()
