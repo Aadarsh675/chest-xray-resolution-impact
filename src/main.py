@@ -566,19 +566,29 @@ def main():
     print(f"Starting training for {NUM_EPOCHS} epochs...")
     for epoch in range(NUM_EPOCHS):
         # ---- Train ----
+        print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")  # epoch header first
         avg_loss = train_one_epoch(model, train_loader, optimizer, device, epoch)
         print(f"[Train] Epoch {epoch+1}/{NUM_EPOCHS} | avg loss: {avg_loss:.4f}")
-
-        # ---- Validate after epoch ----
+    
+        # ---- Validate right after epoch header ----
         val_metrics = evaluate_model(
             model, val_loader, coco_val, device, num_classes,
             img_dir=VAL_IMG_DIR, score_thresh=SCORE_THRESH, topk=TOPK
         )
-        print(f"[Val @ epoch {epoch+1}] {val_metrics}")
-
-        # Save snapshot
+    
+        # print validation score immediately after the epoch line
+        print(
+            f"[Val @ epoch {epoch+1}] "
+            f"mAP={val_metrics['mAP']:.4f} | AP50={val_metrics['AP@50']:.4f} | AP75={val_metrics['AP@75']:.4f} | "
+            f"Disease Acc={val_metrics['disease_acc_pct']:.2f}% | "
+            f"BBox IoU Mean={val_metrics['bbox_iou_mean_pct']:.2f}% | "
+            f"BBox Area MAPE={val_metrics['bbox_area_mape_pct']:.2f}% "
+            f"(matched_pairs={val_metrics['matched_pairs']})"
+        )
+    
+        # Save per-epoch snapshot
         torch.save(model.state_dict(), os.path.join(WEIGHTS_DIR, f"epoch_{epoch+1}.pth"))
-
+    
         # Track best by mAP
         if val_metrics["mAP"] > best_map:
             best_map = val_metrics["mAP"]
