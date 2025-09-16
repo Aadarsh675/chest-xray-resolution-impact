@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 from datetime import datetime
 from PIL import Image
 
@@ -25,7 +26,8 @@ IMAGE_DIR = os.path.join(DATA_DIR, "images")
 TRAIN_ANNO_FILE = os.path.join(ANNO_DIR, "train_annotations_coco.json")
 TRAIN_IMG_DIR   = os.path.join(IMAGE_DIR, "train")
 
-# Using test as validation (change to a real val split if you have one)
+# For simplicity (to mirror your test.py), we use "test" as validation during training.
+# If you have a separate val set, point VAL_* to that and keep TEST_* for final testing.
 VAL_ANNO_FILE   = os.path.join(ANNO_DIR, "test_annotations_coco.json")
 VAL_IMG_DIR     = os.path.join(IMAGE_DIR, "test")
 
@@ -46,8 +48,14 @@ SCORE_THRESH = 0.0
 
 # disease classes (for confusion matrix)
 DISEASE_CLASSES = [
-    "Atelectasis", "Cardiomegaly", "Effusion", "Pneumonia",
-    "Infiltrate", "Pneumothorax", "Nodule", "Mass",
+    "Atelectasis",
+    "Cardiomegaly",
+    "Effusion",
+    "Pneumonia",
+    "Infiltrate",
+    "Pneumothorax",
+    "Nodule",
+    "Mass",
 ]
 
 # -----------------------------
@@ -58,6 +66,7 @@ class SimpleCocoDataset(Dataset):
         self.coco = COCO(anno_file)
         self.img_folder = img_folder
         self.processor = processor
+        # Only use images that have at least one annotation
         self.ids = [img_id for img_id in self.coco.imgs.keys()
                     if len(self.coco.getAnnIds(imgIds=img_id)) > 0]
         print(f"[Dataset] {os.path.basename(img_folder)}: {len(self.ids)} images with annotations")
@@ -73,9 +82,11 @@ class SimpleCocoDataset(Dataset):
         image = Image.open(img_path).convert("RGB")
         width, height = image.size
 
+        # Load annotations
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
 
+        # COCO [x,y,w,h] -> DETR normalized [cx,cy,w,h], 0-index labels
         boxes, labels = [], []
         for ann in anns:
             x, y, w, h = ann['bbox']
@@ -87,7 +98,7 @@ class SimpleCocoDataset(Dataset):
                           max(0, min(1, cy)),
                           max(0, min(1, w_n)),
                           max(0, min(1, h_n))])
-            labels.append(ann['category_id'] - 1)
+            labels.append(ann['category_id'] - 1)  # 0-indexed
 
         encoding = self.processor(images=image, return_tensors="pt")
         pixel_values = encoding["pixel_values"].squeeze(0)
@@ -137,7 +148,7 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
     model.eval()
     results = []
 
-    # extras
+    # extras (init as TWO lists, not one)
     y_true_dz, y_pred_dz = [], []
     iou_list = []
     area_mape_list = []
@@ -165,31 +176,32 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
 
             logits = outputs.logits[i]
             pred_boxes = outputs.pred_boxes[i]
-
-            # drop "no-object" column before argmax
-            probs = logits.softmax(-1)[..., :-1]   # (queries, num_classes)
+            
+            # IMPORTANT: drop the last column (no-object) before argmax
+            probs = logits.softmax(-1)[..., :-1]   # shape: (num_queries, num_classes)
             scores, labels = probs.max(-1)         # labels in [0, num_classes-1]
-            boxes = pred_boxes
+            boxes = pred_boxes                     # keep all boxes; we’ll threshold/topk next
 
-            # top-k
             if scores.numel() > 0 and scores.numel() > topk:
                 topk_idx = torch.topk(scores, k=topk).indices
                 scores = scores[topk_idx]
                 labels = labels[topk_idx]
                 boxes  = boxes[topk_idx]
 
-            # to pixel [x,y,w,h]
+            # transform boxes -> pixel [x,y,w,h]
             if scores.numel() > 0:
                 boxes = boxes.cpu().numpy()
                 boxes = boxes * np.array([width, height, width, height], dtype=np.float32)
                 boxes[:, 0] = boxes[:, 0] - boxes[:, 2] / 2.0
                 boxes[:, 1] = boxes[:, 1] - boxes[:, 3] / 2.0
 
+                # clip to image
                 boxes[:, 0] = np.clip(boxes[:, 0], 0, max(0, width - 1))
                 boxes[:, 1] = np.clip(boxes[:, 1], 0, max(0, height - 1))
                 boxes[:, 2] = np.clip(boxes[:, 2], 1e-6, width)
                 boxes[:, 3] = np.clip(boxes[:, 3], 1e-6, height)
 
+                # add to COCO results
                 for box, score, label in zip(boxes, scores.cpu().numpy(), labels.cpu().numpy()):
                     results.append({
                         "image_id": img_id,
@@ -198,17 +210,18 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
                         "score": float(score),
                     })
 
-            # disease % (image-level)
+            # disease % (image-level top-1)
             ann_ids = coco_gt.getAnnIds(imgIds=img_id)
             anns = coco_gt.loadAnns(ann_ids)
-            if len(anns) > 0 and scores.numel() > 0:
-                gt_cat = anns[0]["category_id"] - 1
-                j = int(torch.argmax(scores).item())
-                pred_cat = int(labels[j].item())
-                y_true_dz.append(gt_cat)
-                y_pred_dz.append(pred_cat)
+            if len(anns) > 0:
+                gt_cat = anns[0]["category_id"] - 1  # to 0-index
+                if scores.numel() > 0:
+                    j = int(torch.argmax(scores).item())
+                    pred_cat = int(labels[j].item())
+                    y_true_dz.append(gt_cat)
+                    y_pred_dz.append(pred_cat)
 
-            # bbox diffs on matched pairs
+            # bbox % diffs on matched pairs
             if scores.numel() > 0 and len(anns) > 0:
                 pred_xyxy = np.stack([boxes[:,0], boxes[:,1], boxes[:,0]+boxes[:,2], boxes[:,1]+boxes[:,3]], axis=1)
                 used_pred = set()
@@ -221,7 +234,9 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
                         continue
                     used_pred.add(k)
 
+                    # IoU (%)
                     iou_list.append(float(ious[k] * 100.0))
+                    # Area MAPE (%)
                     gt_area = max(1e-6, gw * gh)
                     pred_area = max(1e-6, (pred_xyxy[k,2]-pred_xyxy[k,0]) * (pred_xyxy[k,3]-pred_xyxy[k,1]))
                     area_mape_list.append(float(abs(pred_area - gt_area) / gt_area * 100.0))
@@ -244,6 +259,7 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
             "AP@75": float(coco_eval.stats[2]),
         }
 
+    # extra % metrics
     disease_acc = float(np.mean(np.array(y_true_dz) == np.array(y_pred_dz)) * 100.0) if len(y_true_dz) else 0.0
     bbox_iou_mean_pct = float(np.mean(iou_list)) if len(iou_list) else 0.0
     bbox_area_mape_pct = float(np.mean(area_mape_list)) if len(area_mape_list) else 0.0
@@ -266,7 +282,7 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
     disease_to_idx = {name: i for i, name in enumerate(DISEASE_CLASSES)}
     y_true_dz, y_pred_dz = [], []
 
-    # Accumulators
+    # Accumulators for bbox diffs
     loc_dx_abs_pix, loc_dy_abs_pix = [], []
     loc_dx_abs_norm, loc_dy_abs_norm = [], []
     size_dw_abs_pix, size_dh_abs_pix = [], []
@@ -351,7 +367,7 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
             size_dw_abs_norm.append(dw_norm)
             size_dh_abs_norm.append(dh_norm)
 
-    # plot confusion
+    # plot disease confusion
     if len(y_true_dz) > 0:
         cm_dz = confusion_matrix(y_true_dz, y_pred_dz, labels=list(range(len(DISEASE_CLASSES))))
         disp = ConfusionMatrixDisplay(confusion_matrix=cm_dz, display_labels=DISEASE_CLASSES)
@@ -393,6 +409,7 @@ def visualize_predictions(model, processor, coco_val, img_dir,
         image = Image.open(img_path).convert("RGB")
         W, H = image.size
 
+        # GT
         ann_ids = coco_val.getAnnIds(imgIds=img_id)
         anns = coco_val.loadAnns(ann_ids)
 
@@ -400,6 +417,7 @@ def visualize_predictions(model, processor, coco_val, img_dir,
         with torch.no_grad():
             outputs = model(**enc)
 
+        # post-process
         target_sizes = torch.tensor([[H, W]], device=device)
         processed = processor.post_process_object_detection(outputs, target_sizes=target_sizes, threshold=score_thresh)[0]
         boxes_xyxy = processed["boxes"].cpu().numpy()
@@ -410,6 +428,7 @@ def visualize_predictions(model, processor, coco_val, img_dir,
             idx = np.argsort(-scores)[:topk]
             boxes_xyxy, scores, labels = boxes_xyxy[idx], scores[idx], labels[idx]
 
+        # fallback (force top-k queries) if none were kept
         if len(scores) == 0:
             logits = outputs.logits[0].softmax(-1)
             pred_boxes = outputs.pred_boxes[0].cpu().numpy()
@@ -430,6 +449,7 @@ def visualize_predictions(model, processor, coco_val, img_dir,
             y1 = np.clip(y, 0, H - 1)
             boxes_xyxy = np.stack([x1,y1,x2,y2], axis=1)
 
+        # to xywh for drawing
         if len(boxes_xyxy) > 0:
             px = boxes_xyxy[:, 0]
             py = boxes_xyxy[:, 1]
@@ -442,6 +462,7 @@ def visualize_predictions(model, processor, coco_val, img_dir,
         fig, ax = plt.subplots(1, figsize=(8, 8))
         ax.imshow(image, cmap="gray" if use_grayscale else None)
 
+        # GT (yellow)
         for ann in anns:
             gx, gy, gw, gh = ann["bbox"]
             ax.add_patch(patches.Rectangle((gx, gy), gw, gh, linewidth=2,
@@ -451,6 +472,7 @@ def visualize_predictions(model, processor, coco_val, img_dir,
                     color="yellow", fontsize=10, fontweight="bold",
                     backgroundcolor="black", zorder=4)
 
+        # Pred (red)
         for (bx, by, bw, bh), sc, lb in zip(boxes_xywh, scores, labels):
             ax.add_patch(patches.Rectangle((bx, by), bw, bh, linewidth=2,
                                            edgecolor="red", facecolor="none", zorder=3))
@@ -467,7 +489,30 @@ def visualize_predictions(model, processor, coco_val, img_dir,
         plt.show()
 
 # -----------------------------
-# MAIN (validate AFTER EVERY BATCH)
+# Train helpers
+# -----------------------------
+def train_one_epoch(model, dataloader, optimizer, device, epoch_idx):
+    model.train()
+    total_loss = 0.0
+    for batch_idx, (pixel_values, targets) in enumerate(dataloader):
+        pixel_values = pixel_values.to(device)
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+
+        outputs = model(pixel_values=pixel_values, labels=targets)
+        loss = outputs.loss
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        if batch_idx % 10 == 0:
+            print(f"[Train] Epoch {epoch_idx+1} | Batch {batch_idx+1}/{len(dataloader)} | Loss: {loss.item():.4f}")
+
+    return total_loss / max(1, len(dataloader))
+
+# -----------------------------
+# MAIN
 # -----------------------------
 def main():
     print(f"cwd: {os.getcwd()}")
@@ -476,16 +521,19 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
 
+    # Load classes
     with open(TRAIN_ANNO_FILE, "r") as f:
         train_coco_data = json.load(f)
     num_classes = len(train_coco_data["categories"])
     print(f"num_classes: {num_classes}")
 
+    # Init processor & model
     processor = DetrImageProcessor.from_pretrained(MODEL_NAME, size=800)
     model = DetrForObjectDetection.from_pretrained(
         MODEL_NAME, num_labels=num_classes, ignore_mismatched_sizes=True
     ).to(device)
 
+    # Data
     train_dataset = SimpleCocoDataset(TRAIN_IMG_DIR, TRAIN_ANNO_FILE, processor)
     val_dataset   = SimpleCocoDataset(VAL_IMG_DIR,   VAL_ANNO_FILE,   processor)
     test_dataset  = SimpleCocoDataset(TEST_IMG_DIR,  TEST_ANNO_FILE,  processor)
@@ -499,71 +547,55 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE)
 
+    # COCO handles
     coco_val  = COCO(VAL_ANNO_FILE)
     coco_test = COCO(TEST_ANNO_FILE)
 
     best_map = -1.0
-    best_info = {"epoch": None, "step": None, "metrics": None, "time": datetime.now().isoformat()}
+    best_epoch = -1
+    best_metrics = None
 
     print(f"Starting training for {NUM_EPOCHS} epochs...")
-    global_step = 0
     for epoch in range(NUM_EPOCHS):
-        print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
-        model.train()
-        total_loss = 0.0
-
-        for batch_idx, (pixel_values, targets) in enumerate(train_loader):
-            global_step += 1
-
-            pixel_values = pixel_values.to(device)
-            targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
-            outputs = model(pixel_values=pixel_values, labels=targets)
-            loss = outputs.loss
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item()
-            if batch_idx % 10 == 0:
-                print(f"[Train] Epoch {epoch+1} | Batch {batch_idx+1}/{len(train_loader)} | Loss: {loss.item():.4f}")
-
-            # -------- Validate AFTER EVERY BATCH --------
-            val_metrics = evaluate_model(
-                model, val_loader, coco_val, device, num_classes,
-                img_dir=VAL_IMG_DIR, score_thresh=SCORE_THRESH, topk=TOPK
-            )
-            print(
-                f"[Val @ epoch {epoch+1} batch {batch_idx+1}] "
-                f"mAP={val_metrics['mAP']:.4f} | AP50={val_metrics['AP@50']:.4f} | AP75={val_metrics['AP@75']:.4f} | "
-                f"Disease Acc={val_metrics['disease_acc_pct']:.2f}% | "
-                f"BBox IoU Mean={val_metrics['bbox_iou_mean_pct']:.2f}% | "
-                f"BBox Area MAPE={val_metrics['bbox_area_mape_pct']:.2f}% "
-                f"(matched_pairs={val_metrics['matched_pairs']})"
-            )
-
-            # keep best-by-mAP at batch granularity
-            if val_metrics["mAP"] > best_map:
-                best_map = val_metrics["mAP"]
-                best_info = {"epoch": epoch + 1, "step": global_step, "metrics": val_metrics,
-                             "time": datetime.now().isoformat()}
-                torch.save(model.state_dict(), os.path.join(WEIGHTS_DIR, "best.pth"))
-                with open(os.path.join(WEIGHTS_DIR, "best_metrics.json"), "w") as f:
-                    json.dump(best_info, f, indent=2)
-                print(f"[Best] New best mAP={best_map:.4f} at step {global_step}. Saved weights/best.pth")
-
-        avg_loss = total_loss / max(1, len(train_loader))
+        # ---- Train ----
+        print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")  # epoch header first
+        avg_loss = train_one_epoch(model, train_loader, optimizer, device, epoch)
         print(f"[Train] Epoch {epoch+1}/{NUM_EPOCHS} | avg loss: {avg_loss:.4f}")
-
-        # optional: per-epoch snapshot
+    
+        # ---- Validate right after epoch header ----
+        val_metrics = evaluate_model(
+            model, val_loader, coco_val, device, num_classes,
+            img_dir=VAL_IMG_DIR, score_thresh=SCORE_THRESH, topk=TOPK
+        )
+    
+        # print validation score immediately after the epoch line
+        print(
+            f"[Val @ epoch {epoch+1}] "
+            f"mAP={val_metrics['mAP']:.4f} | AP50={val_metrics['AP@50']:.4f} | AP75={val_metrics['AP@75']:.4f} | "
+            f"Disease Acc={val_metrics['disease_acc_pct']:.2f}% | "
+            f"BBox IoU Mean={val_metrics['bbox_iou_mean_pct']:.2f}% | "
+            f"BBox Area MAPE={val_metrics['bbox_area_mape_pct']:.2f}% "
+            f"(matched_pairs={val_metrics['matched_pairs']})"
+        )
+    
+        # Save per-epoch snapshot
         torch.save(model.state_dict(), os.path.join(WEIGHTS_DIR, f"epoch_{epoch+1}.pth"))
+    
+        # Track best by mAP
+        if val_metrics["mAP"] > best_map:
+            best_map = val_metrics["mAP"]
+            best_epoch = epoch + 1
+            best_metrics = val_metrics
+            torch.save(model.state_dict(), os.path.join(WEIGHTS_DIR, "best.pth"))
+            with open(os.path.join(WEIGHTS_DIR, "best_metrics.json"), "w") as f:
+                json.dump({"epoch": best_epoch, "metrics": best_metrics}, f, indent=2)
+            print(f"[Best] New best mAP={best_map:.4f} at epoch {best_epoch}. Saved weights/best.pth")
 
     print("\nTraining complete!")
-    if best_info["epoch"] is not None:
-        print(f"Best checkpoint @ epoch {best_info['epoch']} step {best_info['step']}: {best_info['metrics']}")
+    if best_epoch <= 0:
+        print("Warning: no best epoch recorded — check your validation.")
     else:
-        print("Warning: no best checkpoint recorded.")
+        print(f"Best epoch: {best_epoch} | Best val metrics: {best_metrics}")
 
     # -----------------------------
     # TESTING (using best weights)
@@ -571,6 +603,7 @@ def main():
     print("\n=== TESTING with best weights ===")
     best_path = os.path.join(WEIGHTS_DIR, "best.pth")
     if not os.path.exists(best_path):
+        # Fallback to latest epoch if best missing
         epoch_ckpts = [f for f in os.listdir(WEIGHTS_DIR) if f.startswith("epoch_") and f.endswith(".pth")]
         if not epoch_ckpts:
             raise FileNotFoundError("No weights found for testing.")
@@ -578,17 +611,21 @@ def main():
         best_path = os.path.join(WEIGHTS_DIR, latest)
         print(f"[Test] best.pth not found; using latest epoch checkpoint: {best_path}")
 
+    # Reload model with best weights
     model.load_state_dict(torch.load(best_path, map_location=device))
     model.eval()
 
+    # Evaluate on test set (COCO + extras)
     test_metrics = evaluate_model(
         model, test_loader, coco_test, device, num_classes,
         img_dir=TEST_IMG_DIR, score_thresh=SCORE_THRESH, topk=TOPK
     )
     print(f"[TEST] metrics: {test_metrics}")
 
+    # Confusion matrix + bbox diff summaries (printed)
     disease_confusion_and_bbox_diffs(model, processor, coco_test, TEST_IMG_DIR, iou_thresh=0.1, max_images=None)
 
+    # Visualize a few examples
     visualize_predictions(model, processor, coco_test, TEST_IMG_DIR,
                           num_images=3, score_thresh=0.0, topk=10,
                           random_sample=True, use_grayscale=True)
