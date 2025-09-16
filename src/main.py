@@ -174,14 +174,13 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
                     print(f"[Eval] Failed to read size for {img_path}: {e}")
                     continue
 
-            logits = outputs.logits[i]          # (queries, num_classes+1)
-            pred_boxes = outputs.pred_boxes[i]  # (queries, 4) normalized cx,cy,w,h
-            probs = logits.softmax(-1)
-            scores, labels = probs.max(-1)
-            keep = labels != num_classes
-            scores = scores[keep]
-            labels = labels[keep]
-            boxes  = pred_boxes[keep]
+            logits = outputs.logits[i]
+            pred_boxes = outputs.pred_boxes[i]
+            
+            # IMPORTANT: drop the last column (no-object) before argmax
+            probs = logits.softmax(-1)[..., :-1]   # shape: (num_queries, num_classes)
+            scores, labels = probs.max(-1)         # labels in [0, num_classes-1]
+            boxes = pred_boxes                     # keep all boxes; we’ll threshold/topk next
 
             if scores.numel() > 0 and scores.numel() > topk:
                 topk_idx = torch.topk(scores, k=topk).indices
