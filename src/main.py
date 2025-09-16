@@ -145,20 +145,13 @@ def xywh_to_xyxy(box_xywh):
 @torch.no_grad()
 def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
                    score_thresh=SCORE_THRESH, topk=TOPK, iou_match_thresh=0.1):
-    """
-    Returns:
-      - COCO metrics: mAP, AP@50, AP@75
-      - disease_acc_pct: % images where top-1 predicted disease == GT (using first annotation)
-      - bbox_iou_mean_pct: mean IoU (%) over matched GT–Pred pairs
-      - bbox_area_mape_pct: mean absolute percentage error (%) of bbox area over matched pairs
-      - matched_pairs: number of matched GT–Pred pairs
-    """
     model.eval()
     results = []
 
-    # extras
+    # extras (init as TWO lists, not one)
     y_true_dz, y_pred_dz = [], []
-    iou_list, area_mape_list = []
+    iou_list = []
+    area_mape_list = []
 
     for pixel_values, targets in dataloader:
         pixel_values = pixel_values.to(device)
