@@ -1,3 +1,4 @@
+# main.py
 import os
 import json
 import uuid
@@ -11,6 +12,7 @@ from torch.utils.data import Dataset, DataLoader
 from pycocotools.coco import COCO
 from pycocotools.cocoeval import COCOeval
 from transformers import DetrImageProcessor, DetrForObjectDetection
+import wandb
 
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -508,6 +510,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch_idx):
         total_loss += loss.item()
         if batch_idx % 10 == 0:
             print(f"[Train] Epoch {epoch_idx+1} | Batch {batch_idx+1}/{len(dataloader)} | Loss: {loss.item():.4f}")
+        # W&B per-batch logging
+        wandb.log({"train/loss": loss.item(), "epoch": epoch_idx + 1})
 
     return total_loss / max(1, len(dataloader))
 
@@ -517,6 +521,20 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch_idx):
 def main():
     print(f"cwd: {os.getcwd()}")
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
+
+    # ----- W&B init -----
+    run_name = f"detr_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}"
+    wandb.init(
+        project="detr-nih-chest-xray",
+        name=run_name,
+        config={
+            "epochs": NUM_EPOCHS,
+            "batch_size": BATCH_SIZE,
+            "lr": LEARNING_RATE,
+            "model": MODEL_NAME,
+        }
+    )
+    print(f"W&B run name: {run_name}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
@@ -558,17 +576,17 @@ def main():
     print(f"Starting training for {NUM_EPOCHS} epochs...")
     for epoch in range(NUM_EPOCHS):
         # ---- Train ----
-        print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")  # epoch header first
+        print(f"\n--- Epoch {epoch+1}/{NUM_EPOCHS} ---")
         avg_loss = train_one_epoch(model, train_loader, optimizer, device, epoch)
         print(f"[Train] Epoch {epoch+1}/{NUM_EPOCHS} | avg loss: {avg_loss:.4f}")
-    
+        wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch + 1})
+
         # ---- Validate right after epoch header ----
         val_metrics = evaluate_model(
             model, val_loader, coco_val, device, num_classes,
             img_dir=VAL_IMG_DIR, score_thresh=SCORE_THRESH, topk=TOPK
         )
-    
-        # print validation score immediately after the epoch line
+
         print(
             f"[Val @ epoch {epoch+1}] "
             f"mAP={val_metrics['mAP']:.4f} | AP50={val_metrics['AP@50']:.4f} | AP75={val_metrics['AP@75']:.4f} | "
@@ -577,10 +595,12 @@ def main():
             f"BBox Area MAPE={val_metrics['bbox_area_mape_pct']:.2f}% "
             f"(matched_pairs={val_metrics['matched_pairs']})"
         )
-    
+        # W&B val metrics
+        wandb.log({**{f"val/{k}": v for k, v in val_metrics.items()}, "epoch": epoch + 1})
+
         # Save per-epoch snapshot
         torch.save(model.state_dict(), os.path.join(WEIGHTS_DIR, f"epoch_{epoch+1}.pth"))
-    
+
         # Track best by mAP
         if val_metrics["mAP"] > best_map:
             best_map = val_metrics["mAP"]
@@ -621,6 +641,8 @@ def main():
         img_dir=TEST_IMG_DIR, score_thresh=SCORE_THRESH, topk=TOPK
     )
     print(f"[TEST] metrics: {test_metrics}")
+    # W&B test metrics
+    wandb.log({f"test/{k}": v for k, v in test_metrics.items()})
 
     # Confusion matrix + bbox diff summaries (printed)
     disease_confusion_and_bbox_diffs(model, processor, coco_test, TEST_IMG_DIR, iou_thresh=0.1, max_images=None)
@@ -629,6 +651,8 @@ def main():
     visualize_predictions(model, processor, coco_test, TEST_IMG_DIR,
                           num_images=3, score_thresh=0.0, topk=10,
                           random_sample=True, use_grayscale=True)
+
+    wandb.finish()
 
 if __name__ == "__main__":
     main()
