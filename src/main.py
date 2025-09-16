@@ -1,3 +1,7 @@
+# === Changes: per-class validation printing + W&B logging ===
+# Drop this whole cell in place of your current main.py to add class-wise AP metrics.
+# Everything else stays the same as your last version, with minimal additions marked "### NEW: per-class ..."
+
 # main.py
 import os
 import json
@@ -244,6 +248,7 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
                     area_mape_list.append(float(abs(pred_area - gt_area) / gt_area * 100.0))
 
     # COCOeval
+    per_class = {}  # ### NEW: per-class AP dictionary
     if len(results) == 0:
         coco_metrics = {"mAP": 0.0, "AP@50": 0.0, "AP@75": 0.0}
     else:
@@ -261,6 +266,28 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
             "AP@75": float(coco_eval.stats[2]),
         }
 
+        # ### NEW: compute class-wise AP and AP50
+        precisions = coco_eval.eval['precision']  # [T, R, K, A, M]
+        # indices: T=IoU thresholds, K=categories, choose area=0 (all), maxDet=-1 (last)
+        iou_thrs = coco_eval.params.iouThrs
+        cats = coco_gt.loadCats(coco_gt.getCatIds())
+        for k, cat in enumerate(cats):
+            # All IoUs, all recalls, area all=0, maxDet last
+            p = precisions[:, :, k, 0, -1]
+            p = p[p > -1]
+            ap = float(np.mean(p)) if p.size else float('nan')
+
+            # AP50
+            t_50 = np.where(np.isclose(iou_thrs, 0.5))[0]
+            if t_50.size:
+                p50 = precisions[t_50[0], :, k, 0, -1]
+                p50 = p50[p50 > -1]
+                ap50 = float(np.mean(p50)) if p50.size else float('nan')
+            else:
+                ap50 = float('nan')
+
+            per_class[cat['name']] = {"AP": ap, "AP50": ap50}
+
     # extra % metrics
     disease_acc = float(np.mean(np.array(y_true_dz) == np.array(y_pred_dz)) * 100.0) if len(y_true_dz) else 0.0
     bbox_iou_mean_pct = float(np.mean(iou_list)) if len(iou_list) else 0.0
@@ -271,6 +298,7 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
         "bbox_iou_mean_pct": bbox_iou_mean_pct,
         "bbox_area_mape_pct": bbox_area_mape_pct,
         "matched_pairs": int(len(iou_list)),
+        "per_class": per_class,  # ### NEW: attach per-class results
     })
     return coco_metrics
 
@@ -595,8 +623,24 @@ def main():
             f"BBox Area MAPE={val_metrics['bbox_area_mape_pct']:.2f}% "
             f"(matched_pairs={val_metrics['matched_pairs']})"
         )
+        # ### NEW: Print per-class AP
+        if val_metrics.get("per_class"):
+            print("Per-class AP (IoU=.50:.95) and AP50:")
+            for cls_name, cls_metrics in val_metrics["per_class"].items():
+                ap = cls_metrics["AP"]
+                ap50 = cls_metrics["AP50"]
+                print(f"  - {cls_name:15s} AP={ap:.4f} | AP50={ap50:.4f}")
+
         # W&B val metrics
-        wandb.log({**{f"val/{k}": v for k, v in val_metrics.items()}, "epoch": epoch + 1})
+        wandb.log({**{f"val/{k}": v for k, v in val_metrics.items() if k != "per_class"}, "epoch": epoch + 1})
+        # ### NEW: W&B per-class logging
+        if val_metrics.get("per_class"):
+            log_dict = {}
+            for cls_name, cls_metrics in val_metrics["per_class"].items():
+                log_dict[f"val/AP/{cls_name}"] = cls_metrics["AP"]
+                log_dict[f"val/AP50/{cls_name}"] = cls_metrics["AP50"]
+            log_dict["epoch"] = epoch + 1
+            wandb.log(log_dict)
 
         # Save per-epoch snapshot
         torch.save(model.state_dict(), os.path.join(WEIGHTS_DIR, f"epoch_{epoch+1}.pth"))
@@ -642,7 +686,16 @@ def main():
     )
     print(f"[TEST] metrics: {test_metrics}")
     # W&B test metrics
-    wandb.log({f"test/{k}": v for k, v in test_metrics.items()})
+    wandb.log({f"test/{k}": v for k, v in test_metrics.items() if k != "per_class"})
+    # ### NEW: W&B per-class test logging + print
+    if test_metrics.get("per_class"):
+        print("Test per-class AP (IoU=.50:.95) and AP50:")
+        per_cls_log = {}
+        for cls_name, cls_metrics in test_metrics["per_class"].items():
+            print(f"  - {cls_name:15s} AP={cls_metrics['AP']:.4f} | AP50={cls_metrics['AP50']:.4f}")
+            per_cls_log[f"test/AP/{cls_name}"] = cls_metrics["AP"]
+            per_cls_log[f"test/AP50/{cls_name}"] = cls_metrics["AP50"]
+        wandb.log(per_cls_log)
 
     # Confusion matrix + bbox diff summaries (printed)
     disease_confusion_and_bbox_diffs(model, processor, coco_test, TEST_IMG_DIR, iou_thresh=0.1, max_images=None)
