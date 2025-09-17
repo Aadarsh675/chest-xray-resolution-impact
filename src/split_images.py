@@ -1,99 +1,79 @@
-import pandas as pd
-import os
-import json
-import shutil
-
-# ==== CONFIGURATION ====
-CSV_PATH = '/content/drive/My Drive/nih_chest_xray_dataset/BBox_List_2017.csv'  # kept for logging context
-IMAGE_DIR = '/content/drive/My Drive/nih_chest_xray_dataset/images'
-
-TRAIN_IMAGE_DIR = 'data/images/train'
-TEST_IMAGE_DIR  = 'data/images/test'
-
-SPLIT_SAVE_DIR = 'data/splits'
-SHUFFLED_KEYS_FILE = os.path.join(SPLIT_SAVE_DIR, 'shuffled_image_keys.json')
-TRAIN_SPLIT_FILE   = os.path.join(SPLIT_SAVE_DIR, 'train_images.json')
-TEST_SPLIT_FILE    = os.path.join(SPLIT_SAVE_DIR, 'test_images.json')
-
-TRAIN_RATIO = 0.8  # only used if train/test lists are missing
+@@ -13,27 +13,57 @@
+TRAIN_SPLIT_FILE = os.path.join(SPLIT_SAVE_DIR, 'train_images.json')
+TEST_SPLIT_FILE = os.path.join(SPLIT_SAVE_DIR, 'test_images.json')
 
 
 def load_csv(csv_path):
-    """Load CSV and return DataFrame (optional, for info)."""
-    if not os.path.exists(csv_path):
-        print(f"[Info] CSV not found at {csv_path}. Skipping CSV-based stats.")
-        return None
+    """Load CSV and return DataFrame."""
     df = pd.read_csv(csv_path)
     print(f"Loaded {len(df)} rows from {csv_path}")
     return df
 
 
-def load_split_lists():
-    """
-    Load train/test file lists if they exist. If not, reconstruct from shuffled keys + ratio.
-    Returns (train_files, test_files).
-    """
-    if os.path.exists(TRAIN_SPLIT_FILE) and os.path.exists(TEST_SPLIT_FILE):
-        with open(TRAIN_SPLIT_FILE, 'r') as f:
-            train_files = json.load(f)
-        with open(TEST_SPLIT_FILE, 'r') as f:
-            test_files = json.load(f)
-        print(f"Loaded explicit split lists: {len(train_files)} train, {len(test_files)} test.")
-        return train_files, test_files
+def split_images(df, train_ratio=0.8, random_state=42):
+    """Split images into train and test sets and copy to respective directories."""
+    # Get unique image indices
+    unique_images = df['Image Index'].unique()
+    print(f"Found {len(unique_images)} unique images")
+    """Split images into train and test sets with stratification by disease label and copy to respective directories."""
+    # Get unique images with their corresponding labels
+    unique_images_df = df.groupby('Image Index')['Finding Label'].first().reset_index()
+    print(f"Found {len(unique_images_df)} unique images")
+    
+    # Print number of images per disease label in the original dataset
+    original_counts = unique_images_df['Finding Label'].value_counts()
+    total_images = len(unique_images_df)
+    print("\nOriginal dataset label distribution:")
+    for label, count in original_counts.items():
+        percentage = (count / total_images) * 100
+        print(f"{label}: {count} images ({percentage:.2f}%)")
 
-    # Fallback: use shuffled keys order + TRAIN_RATIO
-    if os.path.exists(SHUFFLED_KEYS_FILE):
-        with open(SHUFFLED_KEYS_FILE, 'r') as f:
-            shuffled_keys = json.load(f)
-        n_total = len(shuffled_keys)
-        n_train = int(TRAIN_RATIO * n_total)
-        train_files = shuffled_keys[:n_train]
-        test_files = shuffled_keys[n_train:]
-        print(f"[Fallback] Built split from shuffled keys: {len(train_files)} train, {len(test_files)} test.")
-        return train_files, test_files
-
-    raise FileNotFoundError(
-        "No split lists found. Expected either "
-        f"'{TRAIN_SPLIT_FILE}' & '{TEST_SPLIT_FILE}' or '{SHUFFLED_KEYS_FILE}'. "
-        "Please run coco_converter.py first."
+    # Split images into train and test
+    # Split images into train and test, stratified by Finding Label
+    train_images, test_images = train_test_split(
+        unique_images, 
+        train_size=train_ratio, 
+        random_state=random_state
+        unique_images_df['Image Index'],
+        train_size=train_ratio,
+        random_state=random_state,
+        stratify=unique_images_df['Finding Label']  # Stratify by disease label
     )
 
+    # Create train and test DataFrames for label distribution
+    train_df = df[df['Image Index'].isin(train_images)]
+    test_df = df[df['Image Index'].isin(test_images)]
+    
+    print(f"\nTrain set: {len(train_df)} annotations for {len(train_images)} images")
+    print(f"Test set: {len(test_df)} annotations for {len(test_images)} images")
+    
+    # Print number of images and percentages per disease label in train and test sets
+    train_counts = train_df.groupby('Image Index')['Finding Label'].first().value_counts()
+    test_counts = test_df.groupby('Image Index')['Finding Label'].first().value_counts()
+    total_train_images = len(train_images)
+    total_test_images = len(test_images)
+    
+    print("\nTrain set label distribution:")
+    for label, count in train_counts.items():
+        percentage = (count / total_train_images) * 100
+        print(f"{label}: {count} images ({percentage:.2f}%)")
+    
+    print("\nTest set label distribution:")
+    for label, count in test_counts.items():
+        percentage = (count / total_test_images) * 100
+        print(f"{label}: {count} images ({percentage:.2f}%)")
+    
+    # Create directories
+    os.makedirs(TRAIN_IMAGE_DIR, exist_ok=True)
+    os.makedirs(TEST_IMAGE_DIR, exist_ok=True)
+@@ -74,11 +104,9 @@ def split_images(df, train_ratio=0.8, random_state=42):
 
-def copy_images(file_list, src_dir, dst_dir):
-    os.makedirs(dst_dir, exist_ok=True)
-    copied = 0
-    for img_name in file_list:
-        src_path = os.path.join(src_dir, img_name)
-        dst_path = os.path.join(dst_dir, img_name)
-        if os.path.exists(src_path):
-            shutil.copy(src_path, dst_path)
-            copied += 1
-        else:
-            print(f"Warning: Image {src_path} not found, skipping...")
-    return copied
+    return train_images, test_images
 
 
 def main():
-    _ = load_csv(CSV_PATH)  # optional info
-
-    # Load split based on saved key order (preferred) or explicit saved lists
-    train_files, test_files = load_split_lists()
-
-    # Copy images into train/test folders
-    n_train = copy_images(train_files, IMAGE_DIR, TRAIN_IMAGE_DIR)
-    n_test  = copy_images(test_files,  IMAGE_DIR, TEST_IMAGE_DIR)
-
-    print(f"Copied {n_train} images to {TRAIN_IMAGE_DIR}")
-    print(f"Copied {n_test} images to {TEST_IMAGE_DIR}")
-
-    # Make sure we persist the final used lists (even if reconstructed from shuffled keys)
-    os.makedirs(SPLIT_SAVE_DIR, exist_ok=True)
-    with open(TRAIN_SPLIT_FILE, 'w') as f:
-        json.dump(list(train_files), f, indent=4)
-    with open(TEST_SPLIT_FILE, 'w') as f:
-        json.dump(list(test_files), f, indent=4)
-    print(f"Saved train image list to {TRAIN_SPLIT_FILE}")
-    print(f"Saved test  image list to {TEST_SPLIT_FILE}")
+    df = load_csv(CSV_PATH)
+    train_images, test_images = split_images(df)
 
 
 if __name__ == "__main__":
