@@ -6,6 +6,7 @@
 import os
 import json
 import uuid
+from zoneinfo import ZoneInfo
 from datetime import datetime
 from PIL import Image
 
@@ -551,7 +552,7 @@ def main():
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
     # ----- W&B init -----
-    run_name = f"detr_run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:8]}"
+    run_name = f"detr_run_{datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     wandb.init(
         project="detr-nih-chest-xray",
         name=run_name,
