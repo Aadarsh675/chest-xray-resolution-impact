@@ -104,8 +104,9 @@ def plot_per_class_three_panel(
     thresholds: np.ndarray,
     agg_per_class: Dict[str, Dict[str, Dict[str, np.ndarray]]],
     out_dir: str,
+    scale_pct: str,   # <<< include resolution in titles
     dpi: int = 140,
-    show: bool = False,   # <<< NEW
+    show: bool = False,
 ) -> None:
     """
     Save one 3-panel figure per class: Precision, Recall, mIoU vs threshold (mean ± std).
@@ -118,7 +119,7 @@ def plot_per_class_three_panel(
         fig, axes = plt.subplots(1, 3, figsize=(14, 4), constrained_layout=True)
         for ax, (mkey, mlabel) in zip(axes, metrics):
             if mkey not in agg_per_class[cls]:
-                ax.set_title(f"{mlabel} (no data)")
+                ax.set_title(f"{mlabel} (no data) — scale {scale_pct}%")
                 ax.set_xlabel("Confidence threshold")
                 ax.set_ylabel(mlabel)
                 ax.grid(True, alpha=0.3)
@@ -129,17 +130,17 @@ def plot_per_class_three_panel(
 
             ax.plot(thresholds, mean, label=f"{mlabel}")
             ax.fill_between(thresholds, mean - std, mean + std, alpha=0.2)
-            ax.set_title(f"{cls} — {mlabel}")
+            ax.set_title(f"{cls} — {mlabel} (scale {scale_pct}%)")
             ax.set_xlabel("Confidence threshold")
             ax.set_ylabel(mlabel)
             ax.set_xlim(thresholds.min(), thresholds.max())
             ax.set_ylim(0.0, 1.0)
             ax.grid(True, alpha=0.3)
 
-        fig.suptitle(f"{cls} — Precision / Recall / mIoU vs Confidence", y=1.04, fontsize=12)
+        fig.suptitle(f"{cls} — Precision / Recall / mIoU vs Confidence (scale {scale_pct}%)", y=1.04, fontsize=12)
         out_path = os.path.join(out_dir, f"{cls.replace(' ', '_')}_curves.png")
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
-        if show:  # <<< NEW
+        if show:
             plt.show()
         plt.close(fig)
 
@@ -147,8 +148,9 @@ def plot_overview_per_metric(
     thresholds: np.ndarray,
     agg_per_class: Dict[str, Dict[str, Dict[str, np.ndarray]]],
     out_dir: str,
+    scale_pct: str,  # <<< include resolution in titles
     dpi: int = 140,
-    show: bool = False,   # <<< NEW
+    show: bool = False,
 ) -> None:
     """
     Optional: Save one figure per metric overlaying all classes (mean curves).
@@ -163,7 +165,7 @@ def plot_overview_per_metric(
                 continue
             mean = agg_per_class[cls][mkey]["mean"]
             ax.plot(thresholds, mean, label=cls)
-        ax.set_title(f"{mlabel} vs Confidence — All Classes")
+        ax.set_title(f"{mlabel} vs Confidence — All Classes (scale {scale_pct}%)")
         ax.set_xlabel("Confidence threshold")
         ax.set_ylabel(mlabel)
         ax.set_xlim(thresholds.min(), thresholds.max())
@@ -172,7 +174,7 @@ def plot_overview_per_metric(
         ax.legend(loc="best", fontsize=8, ncol=2)
         out_path = os.path.join(out_dir, f"ALLCLASSES_{mkey}_overview.png")
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
-        if show:  # <<< NEW
+        if show:
             plt.show()
         plt.close(fig)
 
@@ -186,7 +188,7 @@ def main():
     parser.add_argument("--make_overview", action="store_true",
                         help="Also produce per-metric overview plots with all classes.")
     parser.add_argument("--dpi", type=int, default=140, help="Figure DPI.")
-    parser.add_argument("--show", action="store_true",  # <<< NEW
+    parser.add_argument("--show", action="store_true",
                         help="Display plots inline (use in Google Colab / notebooks).")
     args = parser.parse_args()
 
@@ -223,9 +225,9 @@ def main():
         thresholds, agg = aggregate_repeats(thresholds_list, per_class_list)
 
         out_dir = os.path.join(scale_dir, "plots")
-        plot_per_class_three_panel(thresholds, agg, out_dir=out_dir, dpi=args.dpi, show=args.show)
+        plot_per_class_three_panel(thresholds, agg, out_dir=out_dir, scale_pct=pct, dpi=args.dpi, show=args.show)
         if args.make_overview:
-            plot_overview_per_metric(thresholds, agg, out_dir=out_dir, dpi=args.dpi, show=args.show)
+            plot_overview_per_metric(thresholds, agg, out_dir=out_dir, scale_pct=pct, dpi=args.dpi, show=args.show)
 
         print(f"[OK] Saved plots for scale={pct}% → {out_dir}")
 
