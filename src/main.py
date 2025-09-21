@@ -88,7 +88,8 @@ def main():
 
         for rep in range(1, REPEATS_PER_SCALE + 1):
             # W&B per-run init (Pacific time)
-            run_name = f"detr_run_{pct}pct_rep{rep}_{datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+            pct = int(round(scale * 100))   # scale is 1.0, 0.5, 0.25
+            run_name = f"detr_run_s{pct}_{datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             wandb.init(
                 project="detr-nih-chest-xray",
                 name=run_name,
@@ -97,8 +98,7 @@ def main():
                     "batch_size": BATCH_SIZE,
                     "lr": LEARNING_RATE,
                     "model": MODEL_NAME,
-                    "scale": scale,
-                    "repeat": rep
+                    "scale_pct": pct,  # <<< extra metadata
                 }
             )
             print(f"W&B run name: {run_name}")
