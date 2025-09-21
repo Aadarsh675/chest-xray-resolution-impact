@@ -1,4 +1,12 @@
-@@ -10,63 +10,56 @@
+import pandas as pd
+import os
+import json
+from sklearn.model_selection import train_test_split
+
+# ==== CONFIGURATION ====
+CSV_PATH = '/content/drive/My Drive/nih_chest_xray_dataset/BBox_List_2017.csv'
+SAVE_DIR = 'data/annotations'
+SAVE_FILE = os.path.join(SAVE_DIR, 'annotations_coco.json')
 TRAIN_SAVE_FILE = os.path.join(SAVE_DIR, 'train_annotations_coco.json')
 TEST_SAVE_FILE = os.path.join(SAVE_DIR, 'test_annotations_coco.json')
 
@@ -16,18 +24,12 @@ def split_dataset(df, train_ratio=0.8, random_state=42):
     # Get unique images with their corresponding labels
     unique_images_df = df.groupby('Image Index')['Finding Label'].first().reset_index()
     print(f"Found {len(unique_images_df)} unique images")
-   
-    # Print number of images per disease label in the original dataset
 
     # Print number of images per disease label
     original_counts = unique_images_df['Finding Label'].value_counts()
     total_images = len(unique_images_df)
     print("\nOriginal dataset label distribution:")
     for label, count in original_counts.items():
-        percentage = (count / total_images) * 100
-        print(f"{label}: {count} images ({percentage:.2f}%)")
-   
-    # Split images into train and test, stratified by Finding Label
         print(f"{label}: {count} images ({(count/total_images)*100:.2f}%)")
 
     # Split images
@@ -35,52 +37,39 @@ def split_dataset(df, train_ratio=0.8, random_state=42):
         unique_images_df['Image Index'],
         train_size=train_ratio,
         random_state=random_state,
-        stratify=unique_images_df['Finding Label'] # Stratify by disease label
         stratify=unique_images_df['Finding Label']
     )
-   
-    # Create train and test DataFrames
 
     train_df = df[df['Image Index'].isin(train_images)]
     test_df = df[df['Image Index'].isin(test_images)]
-   
 
     print(f"\nTrain set: {len(train_df)} annotations for {len(train_images)} images")
     print(f"Test set: {len(test_df)} annotations for {len(test_images)} images")
-   
-    # Print number of images and percentages per disease label in train and test sets
 
     # Print label distribution in splits
     train_counts = train_df.groupby('Image Index')['Finding Label'].first().value_counts()
     test_counts = test_df.groupby('Image Index')['Finding Label'].first().value_counts()
-    total_train_images = len(train_images)
-    total_test_images = len(test_images)
-   
 
     print("\nTrain set label distribution:")
     for label, count in train_counts.items():
-        percentage = (count / total_train_images) * 100
-        print(f"{label}: {count} images ({percentage:.2f}%)")
-   
         print(f"{label}: {count} images ({(count/len(train_images))*100:.2f}%)")
 
     print("\nTest set label distribution:")
     for label, count in test_counts.items():
-        percentage = (count / total_test_images) * 100
-        print(f"{label}: {count} images ({percentage:.2f}%)")
-   
         print(f"{label}: {count} images ({(count/len(test_images))*100:.2f}%)")
 
     return train_df, test_df
 
-def parse_bbox(bbox_str):
-    """Parse bounding box coordinates from 'Bbox [x,y,w,h]' column."""
-    bbox = bbox_str.strip('[]').split(',')
-    return [float(coord) for coord in bbox]
 
 def build_coco_format(df):
     """Convert DataFrame to COCO-format dictionary."""
-@@ -80,30 +73,36 @@ def build_coco_format(df):
+    images = []
+    annotations = []
+    categories = []
+    category_name_to_id = {}
+    annotation_id = 1
+    image_id_map = {}
+    image_counter = 1
 
     for _, row in df.iterrows():
         file_name = row["Image Index"]
@@ -91,8 +80,6 @@ def build_coco_format(df):
             images.append({
                 "id": image_counter,
                 "file_name": file_name,
-                "width": None, # Optional: set actual width if available
-                "height": None # Optional: set actual height if available
                 "width": None,  # Optional: fill with actual image size
                 "height": None  # Optional: fill with actual image size
             })
@@ -104,15 +91,9 @@ def build_coco_format(df):
         if category_name not in category_name_to_id:
             category_id = len(category_name_to_id) + 1
             category_name_to_id[category_name] = category_id
-            categories.append({
-                "id": category_id,
-                "name": category_name
-            })
             categories.append({"id": category_id, "name": category_name})
         else:
             category_id = category_name_to_id[category_name]
-        # Create annotation entry
-        bbox = parse_bbox(row["Bbox [x,y,w,h]"])
 
         # Get bbox from separate columns
         bbox = [
@@ -125,12 +106,14 @@ def build_coco_format(df):
         annotations.append({
             "id": annotation_id,
             "image_id": image_id,
-@@ -115,36 +114,39 @@ def build_coco_format(df):
+            "category_id": category_id,
+            "bbox": bbox,
+            "area": bbox[2] * bbox[3],
+            "iscrowd": 0
+        })
         annotation_id += 1
 
     coco_dict = {
-        "info": {},
-        "licenses": [],
         "info": {},       # Empty but required
         "licenses": [],   # Empty but required
         "images": images,
@@ -150,21 +133,14 @@ def save_json(data, save_path):
 
 def main():
     df = load_csv(CSV_PATH)
-   
 
     # Split dataset into train and test
     train_df, test_df = split_dataset(df)
-   
-    # Convert to COCO format
-    coco_data = build_coco_format(df) # Original full dataset
 
     # Build COCO datasets
     coco_data = build_coco_format(df)
     train_coco_data = build_coco_format(train_df)
     test_coco_data = build_coco_format(test_df)
-   
-    # Save JSON files
-    save_json(coco_data, SAVE_FILE) # Original full dataset
 
     # Save JSONs
     save_json(coco_data, SAVE_FILE)
