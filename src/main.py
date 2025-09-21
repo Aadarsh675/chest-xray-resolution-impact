@@ -98,7 +98,7 @@ def main():
                     "batch_size": BATCH_SIZE,
                     "lr": LEARNING_RATE,
                     "model": MODEL_NAME,
-                    "scale_pct": pct,  # <<< extra metadata
+                    "scale_pct": pct,  # extra metadata
                 }
             )
             print(f"W&B run name: {run_name}")
@@ -165,7 +165,6 @@ def main():
             )
             # Optionally log a few example points to W&B
             if curves and wandb.run is not None:
-                # Log the last threshold snapshot as a quick table
                 t_last = curves["thresholds"][-1]
                 log_row = {f"curves/last_threshold": t_last}
                 for cls, d in curves["per_class"].items():
