@@ -72,26 +72,36 @@ def split_images(df, train_ratio=0.8, random_state=42):
     # Copy images
     train_copied = 0
     test_copied = 0
-    
+
+    total_train = len(train_images)
+    total_test = len(test_images)
+    print(f"\nCopying train images ({total_train} total)...")
     for img_name in train_images:
         src_path = os.path.join(IMAGE_DIR, img_name)
         dst_path = os.path.join(TRAIN_IMAGE_DIR, img_name)
         if os.path.exists(src_path):
             shutil.copy(src_path, dst_path)
             train_copied += 1
+            # progress print
+            if train_copied % 100 == 0 or train_copied == total_train:
+                print(f"  Train progress: {train_copied}/{total_train} ({train_copied/total_train*100:.1f}%)")
         else:
             print(f"Warning: Image {src_path} not found, skipping...")
     
+    print(f"\nCopying test images ({total_test} total)...")
     for img_name in test_images:
         src_path = os.path.join(IMAGE_DIR, img_name)
         dst_path = os.path.join(TEST_IMAGE_DIR, img_name)
         if os.path.exists(src_path):
             shutil.copy(src_path, dst_path)
             test_copied += 1
+            # progress print
+            if test_copied % 100 == 0 or test_copied == total_test:
+                print(f"  Test progress: {test_copied}/{total_test} ({test_copied/total_test*100:.1f}%)")
         else:
             print(f"Warning: Image {src_path} not found, skipping...")
     
-    print(f"Copied {train_copied} images to {TRAIN_IMAGE_DIR}")
+    print(f"\nCopied {train_copied} images to {TRAIN_IMAGE_DIR}")
     print(f"Copied {test_copied} images to {TEST_IMAGE_DIR}")
     
     # Save split lists
