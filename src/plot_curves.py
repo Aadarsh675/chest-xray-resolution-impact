@@ -8,12 +8,10 @@ from typing import Dict, List, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 
-
 # ----------------------------
 # I/O helpers
 # ----------------------------
 def find_scales(analysis_root: str) -> List[str]:
-    """Return list of scale_xxx directories under analysis_root."""
     out = []
     if not os.path.isdir(analysis_root):
         return out
@@ -23,9 +21,7 @@ def find_scales(analysis_root: str) -> List[str]:
             out.append(full)
     return out
 
-
 def find_repeats(scale_dir: str) -> List[str]:
-    """Return list of rep_x directories under a given scale directory."""
     reps = []
     for d in sorted(os.listdir(scale_dir)):
         full = os.path.join(scale_dir, d)
@@ -33,34 +29,15 @@ def find_repeats(scale_dir: str) -> List[str]:
             reps.append(full)
     return reps
 
-
 def load_curves_json(curves_path: str) -> Tuple[np.ndarray, Dict[str, Dict[str, np.ndarray]]]:
-    """
-    Load curves.json saved by metrics_curves.py.
-
-    Expected structure (robust to slight variants):
-    {
-      "thresholds": [...],
-      "per_class": {
-         "<class>": {"precision":[...], "recall":[...], "miou":[...]}
-      }
-    }
-
-    Returns:
-      thresholds: (T,) ndarray
-      per_class: dict[class_name] -> dict(metric)->(T,) ndarray
-    """
     with open(curves_path, "r") as f:
         data = json.load(f)
 
-    # thresholds
     if "thresholds" in data:
         thresholds = np.array(data["thresholds"], dtype=float)
     else:
-        # fallback (rare): some versions store top-level keys per metric with shared thresholds inside
         raise ValueError(f"Unable to find 'thresholds' in {curves_path}")
 
-    # per_class
     if "per_class" in data and isinstance(data["per_class"], dict):
         per_class = {}
         for cls, metrics in data["per_class"].items():
@@ -71,7 +48,6 @@ def load_curves_json(curves_path: str) -> Tuple[np.ndarray, Dict[str, Dict[str, 
             }
         return thresholds, per_class
 
-    # fallback variant: { "classes":[...], "precision":{cls:[...]}, "recall":..., "miou":... }
     if "classes" in data:
         per_class = {}
         classes = data["classes"]
@@ -85,7 +61,6 @@ def load_curves_json(curves_path: str) -> Tuple[np.ndarray, Dict[str, Dict[str, 
 
     raise ValueError(f"Unsupported curves.json format in {curves_path}")
 
-
 # ----------------------------
 # Aggregation
 # ----------------------------
@@ -93,40 +68,24 @@ def aggregate_repeats(
     thresholds_list: List[np.ndarray],
     per_class_list: List[Dict[str, Dict[str, np.ndarray]]]
 ) -> Tuple[np.ndarray, Dict[str, Dict[str, Dict[str, np.ndarray]]]]:
-    """
-    Aggregate multiple repeats for one scale.
-
-    Args:
-      thresholds_list: list of (T,) arrays from each repeat
-      per_class_list: list of dict[class]->dict(metric)->(T,) from each repeat
-
-    Returns:
-      thresholds: (T,) float array (we require all repeats to share the same thresholds)
-      agg: dict[class]->dict(metric)->dict{ 'mean':(T,), 'std':(T,) }
-    """
-    # Validate all thresholds identical
     base = thresholds_list[0]
     for th in thresholds_list[1:]:
         if len(th) != len(base) or np.max(np.abs(th - base)) > 1e-9:
             raise ValueError("Threshold arrays differ across repeats; cannot aggregate safely.")
 
-    # Collect per class/metric
-    # structure: stash[class][metric] -> list of arrays (T,)
-    stash: Dict[str, Dict[str, List[np.ndarray]]] = defaultdict(lambda: defaultdict(list))
+    from collections import defaultdict as _dd
+    stash: Dict[str, Dict[str, List[np.ndarray]]] = _dd(lambda: _dd(list))
     for per_class in per_class_list:
         for cls, metrics in per_class.items():
             for mname, arr in metrics.items():
-                # Skip if this repeat didn't have this class/metric populated
                 if arr.size == 0:
                     continue
                 stash[cls][mname].append(arr)
 
-    # Compute mean/std across repeats (align by threshold index)
     agg: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
     for cls, m_dict in stash.items():
         agg[cls] = {}
         for mname, series in m_dict.items():
-            # Stack into (R, T)
             M = np.stack(series, axis=0)  # repeats x T
             agg[cls][mname] = {
                 "mean": np.nanmean(M, axis=0),
@@ -135,22 +94,22 @@ def aggregate_repeats(
 
     return base, agg
 
-
 # ----------------------------
 # Plotting
 # ----------------------------
 def ensure_dir(p: str) -> None:
     os.makedirs(p, exist_ok=True)
 
-
 def plot_per_class_three_panel(
     thresholds: np.ndarray,
     agg_per_class: Dict[str, Dict[str, Dict[str, np.ndarray]]],
     out_dir: str,
-    dpi: int = 140
+    dpi: int = 140,
+    show: bool = False,   # <<< NEW
 ) -> None:
     """
     Save one 3-panel figure per class: Precision, Recall, mIoU vs threshold (mean ± std).
+    If show=True, also display inline (useful in Google Colab).
     """
     ensure_dir(out_dir)
     metrics = [("precision", "Precision"), ("recall", "Recall"), ("miou", "mIoU")]
@@ -174,27 +133,26 @@ def plot_per_class_three_panel(
             ax.set_xlabel("Confidence threshold")
             ax.set_ylabel(mlabel)
             ax.set_xlim(thresholds.min(), thresholds.max())
-            # Clamp y axis to reasonable ranges
-            if mkey in ("precision", "recall"):
-                ax.set_ylim(0.0, 1.0)
-            else:
-                ax.set_ylim(0.0, 1.0)
+            ax.set_ylim(0.0, 1.0)
             ax.grid(True, alpha=0.3)
 
         fig.suptitle(f"{cls} — Precision / Recall / mIoU vs Confidence", y=1.04, fontsize=12)
         out_path = os.path.join(out_dir, f"{cls.replace(' ', '_')}_curves.png")
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+        if show:  # <<< NEW
+            plt.show()
         plt.close(fig)
-
 
 def plot_overview_per_metric(
     thresholds: np.ndarray,
     agg_per_class: Dict[str, Dict[str, Dict[str, np.ndarray]]],
     out_dir: str,
-    dpi: int = 140
+    dpi: int = 140,
+    show: bool = False,   # <<< NEW
 ) -> None:
     """
-    Optional: Save one figure per metric overlaying all classes (mean curves, no std shading to keep readable).
+    Optional: Save one figure per metric overlaying all classes (mean curves).
+    If show=True, also display inline (useful in Google Colab).
     """
     ensure_dir(out_dir)
     metrics = [("precision", "Precision"), ("recall", "Recall"), ("miou", "mIoU")]
@@ -214,8 +172,9 @@ def plot_overview_per_metric(
         ax.legend(loc="best", fontsize=8, ncol=2)
         out_path = os.path.join(out_dir, f"ALLCLASSES_{mkey}_overview.png")
         fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+        if show:  # <<< NEW
+            plt.show()
         plt.close(fig)
-
 
 # ----------------------------
 # Main
@@ -227,6 +186,8 @@ def main():
     parser.add_argument("--make_overview", action="store_true",
                         help="Also produce per-metric overview plots with all classes.")
     parser.add_argument("--dpi", type=int, default=140, help="Figure DPI.")
+    parser.add_argument("--show", action="store_true",  # <<< NEW
+                        help="Display plots inline (use in Google Colab / notebooks).")
     args = parser.parse_args()
 
     scale_dirs = find_scales(args.analysis_root)
@@ -261,16 +222,12 @@ def main():
 
         thresholds, agg = aggregate_repeats(thresholds_list, per_class_list)
 
-        # Save per-class 3-panel curves
         out_dir = os.path.join(scale_dir, "plots")
-        plot_per_class_three_panel(thresholds, agg, out_dir=out_dir, dpi=args.dpi)
-
-        # Optional overview plots (all classes overlaid, per metric)
+        plot_per_class_three_panel(thresholds, agg, out_dir=out_dir, dpi=args.dpi, show=args.show)
         if args.make_overview:
-            plot_overview_per_metric(thresholds, agg, out_dir=out_dir, dpi=args.dpi)
+            plot_overview_per_metric(thresholds, agg, out_dir=out_dir, dpi=args.dpi, show=args.show)
 
         print(f"[OK] Saved plots for scale={pct}% → {out_dir}")
-
 
 if __name__ == "__main__":
     main()
