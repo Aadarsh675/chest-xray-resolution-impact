@@ -35,7 +35,7 @@ SCORE_THRESH = 0.0
 # -----------------------------
 SCALES_TO_BUILD   = [1.0, 0.5, 0.25]   # resolutions to prepare
 ENABLE_SCALES     = True               # set False if pre-built
-REPEATS_PER_SCALE = 2                  # how many training runs per scale
+REPEATS_PER_SCALE = 1                  # how many training runs per scale
 CURVE_THRESHOLDS  = None               # None -> default grid inside metrics_curves
 
 def resolve_paths_for_scale(scale: float):
