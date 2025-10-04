@@ -41,9 +41,9 @@ def run_wget(url: str, out_dir: str, user: str, password: str, quiet: bool = Fal
     """
     cmd = [
         "wget",
-        "-N",              # turn on timestamping (download if newer or missing)
+        "-N",              # timestamping (download if newer or missing)
         "-c",              # continue / resume
-        "--tries=3",       # a few retries
+        "--tries=3",
         "--user", user,
         "--password", password,
         "-P", out_dir,
@@ -51,9 +51,7 @@ def run_wget(url: str, out_dir: str, user: str, password: str, quiet: bool = Fal
     ]
     if quiet:
         cmd.insert(1, "-q")
-    # Avoid prompting for password in worker processes
     env = os.environ.copy()
-    # Run
     proc = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.returncode
 
@@ -71,9 +69,7 @@ def ensure_sha_file(dest_dir: str, base_url: str, user: str, password: str) -> s
 
 
 def parse_sha_file(sha_path: str) -> List[Tuple[str, str]]:
-    """
-    Parse SHA256SUMS.txt into a list of (hash_hex, relative_path).
-    """
+    """Parse SHA256SUMS.txt into a list of (hash_hex, relative_path)."""
     entries: List[Tuple[str, str]] = []
     with open(sha_path, "r") as f:
         for line in f:
@@ -86,10 +82,7 @@ def parse_sha_file(sha_path: str) -> List[Tuple[str, str]]:
 
 
 def identify_needed(entries: List[Tuple[str, str]], dest_dir: str) -> Tuple[List[str], List[str]]:
-    """
-    Determine which files are missing or corrupt.
-    Returns (missing_list, corrupt_list) of relative paths.
-    """
+    """Return (missing_list, corrupt_list) of relative paths."""
     missing, corrupt = [], []
     for h, rel in entries:
         lp = os.path.join(dest_dir, rel)
@@ -105,6 +98,17 @@ def identify_needed(entries: List[Tuple[str, str]], dest_dir: str) -> Tuple[List
     return missing, corrupt
 
 
+# ---------- TOP-LEVEL WORKER (picklable) ----------
+def _download_worker(rel: str, base_url: str, dest_dir: str, user: str, password: str, quiet: bool = False) -> Tuple[str, int]:
+    """Single-file download worker for ProcessPoolExecutor."""
+    url = f"{base_url}/{rel}"
+    out_dir = os.path.join(dest_dir, os.path.dirname(rel))
+    Path(out_dir).mkdir(parents=True, exist_ok=True)
+    rc = run_wget(url, out_dir, user, password, quiet=quiet)
+    return rel, rc
+# --------------------------------------------------
+
+
 def parallel_download(
     rel_paths: List[str],
     base_url: str,
@@ -113,26 +117,16 @@ def parallel_download(
     password: str,
     max_workers: int,
 ) -> Dict[str, bool]:
-    """
-    Download the given relative paths in parallel.
-    Returns a dict rel_path -> success(bool).
-    """
+    """Download the given relative paths in parallel. Returns rel_path -> success(bool)."""
     results: Dict[str, bool] = {}
     if not rel_paths:
         return results
 
     print(f"⬇️ Parallel downloading {len(rel_paths)} files with {max_workers} workers…")
 
-    def _worker(rel: str) -> Tuple[str, int]:
-        url = f"{base_url}/{rel}"
-        out_dir = os.path.join(dest_dir, os.path.dirname(rel))
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-        # Run verbose for visibility (set quiet=True to silence)
-        rc = run_wget(url, out_dir, user, password, quiet=False)
-        return rel, rc
-
     with ProcessPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(_worker, rel) for rel in rel_paths]
+        futs = [ex.submit(_download_worker, rel, base_url, dest_dir, user, password, False)
+                for rel in rel_paths]
         for fut in as_completed(futs):
             rel, rc = fut.result()
             ok = (rc == 0)
@@ -142,9 +136,7 @@ def parallel_download(
 
 
 def reverify(entries: List[Tuple[str, str]], dest_dir: str, subset: List[str] = None) -> List[str]:
-    """
-    Re-verify a subset (or all) entries. Returns list of rel paths still bad.
-    """
+    """Re-verify a subset (or all) entries. Returns list of rel paths still bad."""
     still_bad: List[str] = []
     target = subset if subset is not None else [rel for _, rel in entries]
     expected = {rel: h for h, rel in entries}
