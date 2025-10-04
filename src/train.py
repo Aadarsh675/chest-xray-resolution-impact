@@ -1,3 +1,4 @@
+# train.py
 import os
 import json
 from PIL import Image
@@ -9,7 +10,7 @@ from transformers import DetrImageProcessor
 from pycocotools.coco import COCO
 import wandb
 
-# Import only evaluation (no circular import back to train)
+# Import only evaluation (avoid circular training import)
 from test import evaluate_model
 
 # -----------------------------
@@ -20,9 +21,9 @@ class SimpleCocoDataset(Dataset):
         self.coco = COCO(anno_file)
         self.img_folder = img_folder
         self.processor = processor
-        self.ids = [img_id for img_id in self.coco.imgs.keys()
-                    if len(self.coco.getAnnIds(imgIds=img_id)) > 0]
-        print(f"[Dataset] {os.path.basename(img_folder)}: {len(self.ids)} images with annotations")
+        # KEEP ALL IMAGES (even with zero anns → valid negatives)
+        self.ids = list(self.coco.imgs.keys())
+        print(f"[Dataset] {os.path.basename(img_folder)}: {len(self.ids)} images (incl. empty)")
 
     def __len__(self):
         return len(self.ids)
@@ -45,17 +46,19 @@ class SimpleCocoDataset(Dataset):
             cy = (y + h / 2.0) / H
             w_n = w / W
             h_n = h / H
-            boxes.append([max(0, min(1, cx)),
-                          max(0, min(1, cy)),
-                          max(0, min(1, w_n)),
-                          max(0, min(1, h_n))])
-            labels.append(ann['category_id'] - 1)
+            boxes.append([
+                max(0.0, min(1.0, cx)),
+                max(0.0, min(1.0, cy)),
+                max(0.0, min(1.0, w_n)),
+                max(0.0, min(1.0, h_n)),
+            ])
+            labels.append(ann['category_id'] - 1)  # COCO 1..K → 0..K-1
 
         encoding = self.processor(images=image, return_tensors="pt")
         pixel_values = encoding["pixel_values"].squeeze(0)
         target = {
-            "class_labels": torch.tensor(labels, dtype=torch.long),
-            "boxes": torch.tensor(boxes, dtype=torch.float32),
+            "class_labels": torch.tensor(labels, dtype=torch.long),       # can be empty
+            "boxes": torch.tensor(boxes, dtype=torch.float32),            # can be empty
             "image_id": torch.tensor([img_id], dtype=torch.int64),
         }
         return pixel_values, target
@@ -85,7 +88,8 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch_idx):
         total_loss += loss.item()
         if batch_idx % 10 == 0:
             print(f"[Train] Epoch {epoch_idx+1} | Batch {batch_idx+1}/{len(dataloader)} | Loss: {loss.item():.4f}")
-        wandb.log({"train/loss": loss.item(), "epoch": epoch_idx + 1})
+        if wandb.run is not None:
+            wandb.log({"train/loss": loss.item(), "epoch": epoch_idx + 1})
 
     return total_loss / max(1, len(dataloader))
 
@@ -104,19 +108,23 @@ def train_and_validate(
     weights_dir,
     num_epochs=10,
     batch_size=2,
-    num_workers=0,
+    num_workers=2,
     learning_rate=1e-4,
-    score_thresh=0.0,
+    score_thresh=0.05,
     topk=100,
 ):
     # Data
     train_dataset = SimpleCocoDataset(train_img_dir, train_anno_file, processor)
     val_dataset   = SimpleCocoDataset(val_img_dir,   val_anno_file,   processor)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              collate_fn=collate_fn, num_workers=num_workers)
-    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False,
-                              collate_fn=collate_fn, num_workers=num_workers)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        collate_fn=collate_fn, num_workers=num_workers, pin_memory=True
+    )
+    val_loader   = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False,
+        collate_fn=collate_fn, num_workers=num_workers, pin_memory=True
+    )
 
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -133,7 +141,8 @@ def train_and_validate(
         print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
         avg_loss = train_one_epoch(model, train_loader, optimizer, device, epoch)
         print(f"[Train] Epoch {epoch+1}/{num_epochs} | avg loss: {avg_loss:.4f}")
-        wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch + 1})
+        if wandb.run is not None:
+            wandb.log({"train/epoch_avg_loss": avg_loss, "epoch": epoch + 1})
 
         # Validate
         val_metrics = evaluate_model(
@@ -149,23 +158,23 @@ def train_and_validate(
             f"BBox Area MAPE={val_metrics['bbox_area_mape_pct']:.2f}% "
             f"(matched_pairs={val_metrics['matched_pairs']})"
         )
-        # Per-class print
         if val_metrics.get("per_class"):
             print("Per-class AP (IoU=.50:.95) and AP50:")
             for cls_name, cls_metrics in val_metrics["per_class"].items():
                 ap = cls_metrics["AP"]
                 ap50 = cls_metrics["AP50"]
-                print(f"  - {cls_name:15s} AP={ap:.4f} | AP50={ap50:.4f}")
+                print(f"  - {cls_name:20s} AP={ap:.4f} | AP50={ap50:.4f}")
 
         # Log to W&B
-        wandb.log({**{f"val/{k}": v for k, v in val_metrics.items() if k != "per_class"}, "epoch": epoch + 1})
-        if val_metrics.get("per_class"):
-            log_dict = {}
-            for cls_name, cls_metrics in val_metrics["per_class"].items():
-                log_dict[f"val/AP/{cls_name}"] = cls_metrics["AP"]
-                log_dict[f"val/AP50/{cls_name}"] = cls_metrics["AP50"]
-            log_dict["epoch"] = epoch + 1
-            wandb.log(log_dict)
+        if wandb.run is not None:
+            wandb.log({**{f"val/{k}": v for k, v in val_metrics.items() if k != "per_class"}, "epoch": epoch + 1})
+            if val_metrics.get("per_class"):
+                log_dict = {}
+                for cls_name, cls_metrics in val_metrics["per_class"].items():
+                    log_dict[f"val/AP/{cls_name}"] = cls_metrics["AP"]
+                    log_dict[f"val/AP50/{cls_name}"] = cls_metrics["AP50"]
+                log_dict["epoch"] = epoch + 1
+                wandb.log(log_dict)
 
         # Save snapshot
         os.makedirs(weights_dir, exist_ok=True)
@@ -179,6 +188,6 @@ def train_and_validate(
             torch.save(model.state_dict(), os.path.join(weights_dir, "best.pth"))
             with open(os.path.join(weights_dir, "best_metrics.json"), "w") as f:
                 json.dump({"epoch": best_epoch, "metrics": best_metrics}, f, indent=2)
-            print(f"[Best] New best mAP={best_map:.4f} at epoch {best_epoch}. Saved {os.path.join(weights_dir, 'best.pth')}")
+            print(f"[Best] New best mAP={best_map:.4f} at epoch {best_epoch}. Saved best.pth")
 
     return best_epoch, best_metrics
