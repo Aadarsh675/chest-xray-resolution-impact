@@ -1,27 +1,29 @@
+#!/usr/bin/env python3
 # tools/vindr_pcxr_fetch.py
 """
-Verify and (re)download the ViNDr-PCXR dataset from PhysioNet using SHA256SUMS.txt.
-- Skips files that already match the expected hash.
-- Redownloads only missing/corrupt files.
-- Supports parallel downloads via ProcessPoolExecutor.
-- Uses wget with --user/--password (read from CLI args or PHYSIONET_PASSWORD env var).
+Fast ViNDr-PCXR fetcher with verification and resume.
+
+- Reads SHA256SUMS.txt (downloading if needed).
+- Verifies which files are missing/corrupt.
+- Uses a single aria2c job list for high-throughput parallel + segmented downloads.
+- Optionally stages to local disk, then rsyncs to Google Drive (faster).
+- Safe to re-run; already-verified files are skipped.
 
 Example:
   python tools/vindr_pcxr_fetch.py \
-      --dest "/content/drive/MyDrive/vindr_pcxr/1.0.0" \
-      --user YOUR_USERNAME \
-      --password YOUR_PASSWORD \
-      --max-workers 8
+    --dest "/content/drive/MyDrive/vindr_pcxr/1.0.0" \
+    --user <USER> --password <PASS> \
+    --max-jobs 32 --per-file-conns 16 --segments 16 \
+    --stage-dir "/content/vindr_staging"
 """
 
 import argparse
 import hashlib
 import os
-import subprocess
 import sys
-from concurrent.futures import ProcessPoolExecutor, as_completed
+import subprocess
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple, Dict
 
 DEFAULT_BASE_URL = "https://physionet.org/files/vindr-pcxr/1.0.0"
 
@@ -34,42 +36,28 @@ def sha256sum(fp: str) -> str:
     return h.hexdigest()
 
 
-def run_wget(url: str, out_dir: str, user: str, password: str, quiet: bool = False) -> int:
-    """
-    Download a single file to out_dir using wget with resume enabled.
-    Returns the subprocess return code (0 == success).
-    """
+def run_wget(url: str, out_dir: str, user: str, password: str) -> int:
+    """Small helper just to get SHA256SUMS.txt if needed."""
     cmd = [
-        "wget",
-        "-N",              # timestamping (download if newer or missing)
-        "-c",              # continue / resume
-        "--tries=3",
-        "--user", user,
-        "--password", password,
-        "-P", out_dir,
-        url,
+        "wget", "-q", "-N", "-c",
+        "--user", user, "--password", password,
+        "-P", out_dir, url,
     ]
-    if quiet:
-        cmd.insert(1, "-q")
-    env = os.environ.copy()
-    proc = subprocess.run(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    return proc.returncode
+    return subprocess.run(cmd).returncode
 
 
 def ensure_sha_file(dest_dir: str, base_url: str, user: str, password: str) -> str:
-    """Ensure SHA256SUMS.txt exists locally; download if missing. Return its path."""
     sha_path = os.path.join(dest_dir, "SHA256SUMS.txt")
     if not os.path.exists(sha_path):
         print("📥 Fetching SHA256SUMS.txt …")
         Path(dest_dir).mkdir(parents=True, exist_ok=True)
-        rc = run_wget(f"{base_url}/SHA256SUMS.txt", dest_dir, user, password, quiet=False)
+        rc = run_wget(f"{base_url}/SHA256SUMS.txt", dest_dir, user, password)
         if rc != 0 or not os.path.exists(sha_path):
-            raise FileNotFoundError("Failed to download SHA256SUMS.txt. Check credentials or connectivity.")
+            raise FileNotFoundError("Failed to download SHA256SUMS.txt. Check credentials/connectivity.")
     return sha_path
 
 
 def parse_sha_file(sha_path: str) -> List[Tuple[str, str]]:
-    """Parse SHA256SUMS.txt into a list of (hash_hex, relative_path)."""
     entries: List[Tuple[str, str]] = []
     with open(sha_path, "r") as f:
         for line in f:
@@ -82,61 +70,99 @@ def parse_sha_file(sha_path: str) -> List[Tuple[str, str]]:
 
 
 def identify_needed(entries: List[Tuple[str, str]], dest_dir: str) -> Tuple[List[str], List[str]]:
-    """Return (missing_list, corrupt_list) of relative paths."""
     missing, corrupt = [], []
     for h, rel in entries:
-        lp = os.path.join(dest_dir, rel)
-        if not os.path.exists(lp):
+        local = os.path.join(dest_dir, rel)
+        if not os.path.exists(local):
             missing.append(rel)
             continue
         try:
-            got = sha256sum(lp)
-            if got.lower() != h.lower():
+            if sha256sum(local).lower() != h.lower():
                 corrupt.append(rel)
         except Exception:
             corrupt.append(rel)
     return missing, corrupt
 
 
-# ---------- TOP-LEVEL WORKER (picklable) ----------
-def _download_worker(rel: str, base_url: str, dest_dir: str, user: str, password: str, quiet: bool = False) -> Tuple[str, int]:
-    """Single-file download worker for ProcessPoolExecutor."""
-    url = f"{base_url}/{rel}"
-    out_dir = os.path.join(dest_dir, os.path.dirname(rel))
-    Path(out_dir).mkdir(parents=True, exist_ok=True)
-    rc = run_wget(url, out_dir, user, password, quiet=quiet)
-    return rel, rc
-# --------------------------------------------------
-
-
-def parallel_download(
+def write_aria2_list(
     rel_paths: List[str],
     base_url: str,
-    dest_dir: str,
+    out_dir: str,
     user: str,
     password: str,
-    max_workers: int,
-) -> Dict[str, bool]:
-    """Download the given relative paths in parallel. Returns rel_path -> success(bool)."""
-    results: Dict[str, bool] = {}
-    if not rel_paths:
-        return results
+    list_path: str
+) -> None:
+    """
+    Write an aria2 input list where each file has:
+      URL
+       out=<filename>
+       dir=<directory>
+    """
+    lines: List[str] = []
+    for rel in rel_paths:
+        url = f"{base_url}/{rel}"
+        subdir = os.path.dirname(rel)
+        fname = os.path.basename(rel)
+        target_dir = os.path.join(out_dir, subdir)
+        Path(target_dir).mkdir(parents=True, exist_ok=True)
 
-    print(f"⬇️ Parallel downloading {len(rel_paths)} files with {max_workers} workers…")
+        lines.append(url)
+        lines.append(f"  out={fname}")
+        lines.append(f"  dir={target_dir}")
+    with open(list_path, "w") as f:
+        f.write("\n".join(lines))
+    # Restrict permissions (contains structure but not creds)
+    os.chmod(list_path, 0o600)
 
-    with ProcessPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(_download_worker, rel, base_url, dest_dir, user, password, False)
-                for rel in rel_paths]
-        for fut in as_completed(futs):
-            rel, rc = fut.result()
-            ok = (rc == 0)
-            results[rel] = ok
-            print(f"   {'✅' if ok else '❌'} {rel}")
-    return results
+
+def run_aria2c(
+    list_file: str,
+    user: str,
+    password: str,
+    max_jobs: int,
+    per_file_conns: int,
+    segments: int
+) -> int:
+    """
+    Run aria2c once over the whole job list.
+    Notes:
+      - --continue, --auto-file-renaming=false to keep names stable
+      - --http-user/--http-passwd for authenticated endpoints
+    """
+    cmd = [
+        "aria2c",
+        "--allow-overwrite=true",
+        "--auto-file-renaming=false",
+        "--continue=true",
+        "--enable-rpc=false",
+        "--file-allocation=none",
+        "--http-user", user,
+        "--http-passwd", password,
+        "-j", str(max_jobs),         # concurrent downloads
+        "-x", str(per_file_conns),   # per-file connections
+        "-s", str(segments),         # split each file into N segments
+        "-i", list_file,
+    ]
+    print("🚀 Launching aria2c …")
+    print("   ", " ".join(cmd))
+    return subprocess.run(cmd).returncode
+
+
+def rsync_stage_to_dest(stage_dir: str, dest_dir: str) -> int:
+    """
+    Sync local staged files to final destination. rsync is efficient for Drive writes.
+    """
+    Path(dest_dir).mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "rsync", "-a", "--info=progress2",
+        os.path.join(stage_dir, ""),  # trailing slash to copy contents
+        os.path.join(dest_dir, ""),
+    ]
+    print("📦 Syncing staged files to destination …")
+    return subprocess.run(cmd).returncode
 
 
 def reverify(entries: List[Tuple[str, str]], dest_dir: str, subset: List[str] = None) -> List[str]:
-    """Re-verify a subset (or all) entries. Returns list of rel paths still bad."""
     still_bad: List[str] = []
     target = subset if subset is not None else [rel for _, rel in entries]
     expected = {rel: h for h, rel in entries}
@@ -155,33 +181,37 @@ def reverify(entries: List[Tuple[str, str]], dest_dir: str, subset: List[str] = 
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Verify / resume ViNDr-PCXR download using SHA256SUMS.txt (parallel).")
-    ap.add_argument("--dest", type=str, required=True,
-                    help="Local destination directory (e.g., /content/drive/MyDrive/vindr_pcxr/1.0.0)")
-    ap.add_argument("--base-url", type=str, default=DEFAULT_BASE_URL,
-                    help=f"Base URL (default: {DEFAULT_BASE_URL})")
-    ap.add_argument("--user", type=str, required=True, help="PhysioNet username")
-    ap.add_argument("--password", type=str, default=os.environ.get("PHYSIONET_PASSWORD", ""),
-                    help="PhysioNet password (or set env PHYSIONET_PASSWORD)")
-    ap.add_argument("--max-workers", type=int, default=8, help="Parallel download workers")
+    ap = argparse.ArgumentParser(description="Fast verify/resume ViNDr-PCXR download with aria2c.")
+    ap.add_argument("--dest", required=True, type=str,
+                    help="Final dataset directory (e.g., /content/drive/MyDrive/vindr_pcxr/1.0.0)")
+    ap.add_argument("--base-url", default=DEFAULT_BASE_URL, type=str)
+    ap.add_argument("--user", required=True, type=str, help="PhysioNet username")
+    ap.add_argument("--password", default=os.environ.get("PHYSIONET_PASSWORD", ""), type=str,
+                    help="PhysioNet password or env PHYSIONET_PASSWORD")
+    ap.add_argument("--max-jobs", default=32, type=int, help="Global concurrent downloads")
+    ap.add_argument("--per-file-conns", default=16, type=int, help="Connections per file (-x)")
+    ap.add_argument("--segments", default=16, type=int, help="Splits per file (-s)")
     ap.add_argument("--verify-only", action="store_true", help="Only verify files; do not download")
+    ap.add_argument("--stage-dir", default="", type=str,
+                    help="Optional local staging dir (e.g., /content/vindr_staging). If empty, download directly to --dest.")
     args = ap.parse_args()
 
-    dest_dir = args.dest
-    Path(dest_dir).mkdir(parents=True, exist_ok=True)
-
     if not args.password:
-        print("❌ No password provided. Use --password or set PHYSIONET_PASSWORD env var.", file=sys.stderr)
+        print("❌ No password provided. Use --password or set PHYSIONET_PASSWORD.", file=sys.stderr)
         sys.exit(2)
 
-    # Ensure checksum file exists
+    dest_dir = args.dest
+    stage_dir = args.stage_dir.strip() or dest_dir  # default: no staging (direct to dest)
+    Path(dest_dir).mkdir(parents=True, exist_ok=True)
+    Path(stage_dir).mkdir(parents=True, exist_ok=True)
+
+    # Ensure SHA file in DEST (checksum reference lives next to final dataset)
     sha_path = ensure_sha_file(dest_dir, args.base_url, args.user, args.password)
 
-    # Parse entries
+    # Parse + verify current state (in DEST)
     entries = parse_sha_file(sha_path)
     print(f"🧾 Found {len(entries)} entries in SHA256SUMS.txt")
 
-    # Identify missing/corrupt
     missing, corrupt = identify_needed(entries, dest_dir)
     ok_count = len(entries) - len(missing) - len(corrupt)
     print(f"📦 Status: {ok_count} OK, {len(missing)} missing, {len(corrupt)} corrupt")
@@ -190,51 +220,45 @@ def main():
         print("✅ Verification complete (no downloads requested).")
         sys.exit(0)
 
-    # Delete corrupt files before re-download to avoid wget -N skip
+    # Remove corrupt files in DEST so they will be redownloaded
     for rel in corrupt:
-        lp = os.path.join(dest_dir, rel)
         try:
-            os.remove(lp)
+            os.remove(os.path.join(dest_dir, rel))
         except FileNotFoundError:
             pass
 
     need = missing + corrupt
     if not need:
-        print("✅ Dataset already complete — no download needed.")
+        print("✅ Dataset already complete — nothing to download.")
         sys.exit(0)
 
-    # Download in parallel
-    results = parallel_download(
-        rel_paths=need,
-        base_url=args.base_url,
-        dest_dir=dest_dir,
-        user=args.user,
-        password=args.password,
-        max_workers=args.max_workers,
-    )
+    # Build aria2 list file AGAINST STAGE DIR (fast local disk recommended)
+    list_path = os.path.join(stage_dir, "_aria2_joblist.txt")
+    write_aria2_list(need, args.base_url, stage_dir, args.user, args.password, list_path)
 
-    # Re-verify only the ones we attempted
-    to_check = [rel for rel, ok in results.items() if ok]
-    still_bad = reverify(entries, dest_dir, subset=to_check)
+    # Download to stage (or direct dest if stage==dest)
+    rc = run_aria2c(list_path, args.user, args.password, args.max_jobs, args.per_file_conns, args.segments)
+    if rc != 0:
+        print("⚠️ aria2c exited with non-zero status. You can re-run to resume.", file=sys.stderr)
 
-    failed = [rel for rel, ok in results.items() if not ok]
+    # If we staged to local, sync to final destination
+    if os.path.abspath(stage_dir) != os.path.abspath(dest_dir):
+        rc_sync = rsync_stage_to_dest(stage_dir, dest_dir)
+        if rc_sync != 0:
+            print("⚠️ rsync reported errors while syncing to destination.", file=sys.stderr)
+
+    # Re-verify only the files we attempted
+    still_bad = reverify(entries, dest_dir, subset=need)
+
     if still_bad:
         print(f"⚠️ {len(still_bad)} file(s) still mismatched after download:")
         for rel in still_bad[:20]:
             print("   -", rel)
         if len(still_bad) > 20:
             print("   …")
-    if failed:
-        print(f"❌ {len(failed)} file(s) failed to download:")
-        for rel in failed[:20]:
-            print("   -", rel)
-        if len(failed) > 20:
-            print("   …")
-
-    if not still_bad and not failed:
-        print("🎉 All requested files verified successfully.")
+        print("ℹ️ You can re-run this script to resume the remaining files.")
     else:
-        print("ℹ️ You can re-run this script to resume any remaining files.")
+        print("🎉 All requested files verified successfully.")
 
 
 if __name__ == "__main__":
