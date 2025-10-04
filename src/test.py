@@ -1,3 +1,4 @@
+# test.py
 import os
 import json
 from PIL import Image
@@ -15,20 +16,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import wandb
-
-# -----------------------------
-# Disease classes (for confusion matrix labels)
-# -----------------------------
-DISEASE_CLASSES = [
-    "Atelectasis",
-    "Cardiomegaly",
-    "Effusion",
-    "Pneumonia",
-    "Infiltrate",
-    "Pneumothorax",
-    "Nodule",
-    "Mass",
-]
 
 # -----------------------------
 # Utilities
@@ -54,16 +41,15 @@ def xywh_to_xyxy(box_xywh):
     return np.array([x, y, x + w, y + h], dtype=np.float32)
 
 # -----------------------------
-# (Optional) Dataset for standalone test runs
+# Dataset (keeps empty images)
 # -----------------------------
 class SimpleCocoDataset(Dataset):
     def __init__(self, img_folder, anno_file, processor):
         self.coco = COCO(anno_file)
         self.img_folder = img_folder
         self.processor = processor
-        self.ids = [img_id for img_id in self.coco.imgs.keys()
-                    if len(self.coco.getAnnIds(imgIds=img_id)) > 0]
-        print(f"[Dataset] {os.path.basename(img_folder)}: {len(self.ids)} images with annotations")
+        self.ids = list(self.coco.imgs.keys())  # KEEP ALL IMAGES
+        print(f"[Dataset] {os.path.basename(img_folder)}: {len(self.ids)} images (incl. empty)")
 
     def __len__(self):
         return len(self.ids)
@@ -111,7 +97,7 @@ def collate_fn(batch):
 # -----------------------------
 @torch.no_grad()
 def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
-                   score_thresh=0.0, topk=100, iou_match_thresh=0.1):
+                   score_thresh=0.05, topk=100, iou_match_thresh=0.1):
     model.eval()
     results = []
 
@@ -143,9 +129,19 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
             logits = outputs.logits[i]
             pred_boxes = outputs.pred_boxes[i]
 
-            probs = logits.softmax(-1)[..., :-1]
+            probs = logits.softmax(-1)[..., :-1]  # exclude no-object
             scores, labels = probs.max(-1)
             boxes = pred_boxes
+
+            # threshold then top-k
+            if scores.numel() > 0:
+                keep = scores > score_thresh
+                if keep.any():
+                    scores = scores[keep]
+                    labels = labels[keep]
+                    boxes  = boxes[keep]
+                else:
+                    scores = scores[:0]; labels = labels[:0]; boxes = boxes[:0]
 
             if scores.numel() > 0 and scores.numel() > topk:
                 topk_idx = torch.topk(scores, k=topk).indices
@@ -167,21 +163,22 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
                 for box, score, label in zip(boxes, scores.cpu().numpy(), labels.cpu().numpy()):
                     results.append({
                         "image_id": img_id,
-                        "category_id": int(label) + 1,
+                        "category_id": int(label) + 1,  # back to COCO id space
                         "bbox": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
                         "score": float(score),
                     })
 
+            # image-level proxy (skip empty-annotation images)
             ann_ids = coco_gt.getAnnIds(imgIds=img_id)
             anns = coco_gt.loadAnns(ann_ids)
-            if len(anns) > 0:
+            if len(anns) > 0 and scores.numel() > 0:
                 gt_cat = anns[0]["category_id"] - 1
-                if scores.numel() > 0:
-                    j = int(torch.argmax(scores).item())
-                    pred_cat = int(labels[j].item())
-                    y_true_dz.append(gt_cat)
-                    y_pred_dz.append(pred_cat)
+                j = int(torch.argmax(scores).item())
+                pred_cat = int(labels[j].item())
+                y_true_dz.append(gt_cat)
+                y_pred_dz.append(pred_cat)
 
+            # localization diffs on matched pairs
             if scores.numel() > 0 and len(anns) > 0:
                 pred_xyxy = np.stack([boxes[:,0], boxes[:,1], boxes[:,0]+boxes[:,2], boxes[:,1]+boxes[:,3]], axis=1)
                 used_pred = set()
@@ -251,11 +248,15 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
 # -----------------------------
 # Confusion matrix + bbox diffs
 # -----------------------------
-def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_thresh=0.1, max_images=None):
+def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_thresh=0.1, max_images=None, class_names=None):
     device = next(model.parameters()).device
     cat_id_to_name = {c['id']: c['name'] for c in coco_val.dataset['categories']}
 
-    disease_to_idx = {name: i for i, name in enumerate(DISEASE_CLASSES)}
+    # fallback
+    if class_names is None:
+        class_names = [cat_id_to_name[cid] for cid in sorted(cat_id_to_name.keys())]
+
+    disease_to_idx = {name: i for i, name in enumerate(class_names)}
     y_true_dz, y_pred_dz = [], []
 
     loc_dx_abs_pix, loc_dy_abs_pix = [], []
@@ -276,7 +277,7 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
         ann_ids = coco_val.getAnnIds(imgIds=img_id)
         anns = coco_val.loadAnns(ann_ids)
         if len(anns) == 0:
-            continue
+            continue  # skip "No finding" for this image-level confusion matrix
 
         enc = processor(images=image, return_tensors="pt").to(device)
         with torch.no_grad():
@@ -333,15 +334,15 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
             size_dw_abs_norm.append(dw_norm); size_dh_abs_norm.append(dh_norm)
 
     if len(y_true_dz) > 0:
-        cm_dz = confusion_matrix(y_true_dz, y_pred_dz, labels=list(range(len(DISEASE_CLASSES))))
-        disp = ConfusionMatrixDisplay(confusion_matrix=cm_dz, display_labels=DISEASE_CLASSES)
-        fig, ax = plt.subplots(figsize=(8, 7))
+        cm_dz = confusion_matrix(y_true_dz, y_pred_dz, labels=list(range(len(class_names))))
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm_dz, display_labels=class_names)
+        fig, ax = plt.subplots(figsize=(max(8, 0.6*len(class_names)), 7))
         disp.plot(ax=ax, xticks_rotation=45, cmap="Blues", colorbar=False)
-        ax.set_title("Confusion Matrix — Disease (Image-level)")
+        ax.set_title("Confusion Matrix — Image-level (GT first ann vs top pred)")
         plt.tight_layout()
         plt.show()
     else:
-        print("Disease confusion matrix: not enough samples in the specified 8 classes.")
+        print("Disease confusion matrix: not enough samples in the current class set.")
 
     def safe_mean(arr): return float(np.mean(arr)) if len(arr) > 0 else float("nan")
     print("\nAverage bounding-box differences over matched GT–prediction pairs:")
@@ -354,7 +355,7 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
 # Visualization
 # -----------------------------
 def visualize_predictions(model, processor, coco_val, img_dir,
-                          num_images=3, score_thresh=0.0, topk=8,
+                          num_images=3, score_thresh=0.05, topk=8,
                           random_sample=True, use_grayscale=True):
     model.eval()
     device = next(model.parameters()).device
@@ -431,7 +432,8 @@ def visualize_predictions(model, processor, coco_val, img_dir,
 # -----------------------------
 def run_test(model, processor, device, num_classes,
              test_img_dir, test_anno_file, weights_dir,
-             score_thresh=0.0, topk=100, do_confusion=True, do_viz=True):
+             score_thresh=0.05, topk=100, do_confusion=True, do_viz=True,
+             class_names=None):
 
     best_path = os.path.join(weights_dir, "best.pth")
     if not os.path.exists(best_path):
@@ -446,7 +448,7 @@ def run_test(model, processor, device, num_classes,
     model.eval()
 
     test_dataset = SimpleCocoDataset(test_img_dir, test_anno_file, processor)
-    test_loader  = DataLoader(test_dataset, batch_size=2, shuffle=False, collate_fn=collate_fn, num_workers=0)
+    test_loader  = DataLoader(test_dataset, batch_size=2, shuffle=False, collate_fn=collate_fn, num_workers=2, pin_memory=True)
     coco_test = COCO(test_anno_file)
 
     test_metrics = evaluate_model(
@@ -465,13 +467,14 @@ def run_test(model, processor, device, num_classes,
             wandb.log(per_cls_log)
 
     if do_confusion:
-        disease_confusion_and_bbox_diffs(model, processor, coco_test, test_img_dir, iou_thresh=0.1, max_images=None)
+        disease_confusion_and_bbox_diffs(
+            model, processor, coco_test, test_img_dir,
+            iou_thresh=0.1, max_images=None, class_names=class_names
+        )
     if do_viz:
         visualize_predictions(model, processor, coco_test, test_img_dir, num_images=3, score_thresh=0.0, topk=10, random_sample=True, use_grayscale=True)
 
     return test_metrics
 
 if __name__ == "__main__":
-    # Optional: minimal standalone test runner using defaults if desired.
-    # Typically you'll call run_test(...) from main.py after training.
     pass
