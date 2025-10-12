@@ -13,25 +13,10 @@ import test as test_mod
 from metrics_curves import export_threshold_curves
 
 # -----------------------------
-# Base paths / constants
+# Paths / constants
 # -----------------------------
-# Your COCO JSONs created by coco_converter.py
-ANNO_DIR        = os.path.join("data", "annotations")
-TRAIN_JSON_BASE = os.path.join(ANNO_DIR, "train_annotations_coco.json")
-TEST_JSON       = os.path.join(ANNO_DIR, "test_annotations_coco.json")
-
-# Where we write the split versions
-TRAIN_SPLIT_JSON = os.path.join(ANNO_DIR, "train_annotations_coco_split.json")
-VAL_JSON         = os.path.join(ANNO_DIR, "val_annotations_coco.json")
-
-# Point these to your actual PNG locations on Drive (or override via env vars)
-DEFAULT_TRAIN_IMG_DIR = "/content/drive/MyDrive/vindr_pcxr/train"
-DEFAULT_TEST_IMG_DIR  = "/content/drive/MyDrive/vindr_pcxr/test"
-
-TRAIN_IMG_DIR = os.environ.get("TRAIN_IMG_DIR", DEFAULT_TRAIN_IMG_DIR)
-VAL_IMG_DIR   = TRAIN_IMG_DIR   # same folder; val is subset of train images
-TEST_IMG_DIR  = os.environ.get("TEST_IMG_DIR",  DEFAULT_TEST_IMG_DIR)
-
+ANNO_DIR     = os.path.join("data", "annotations")  # COCO jsons live here
+IMAGE_ROOT   = "/content/drive/MyDrive/vindr_pcxr"  # PNGs live here: train/ and test/
 WEIGHTS_DIR  = "weights"
 MODEL_NAME   = "facebook/detr-resnet-50"
 
@@ -40,15 +25,22 @@ NUM_WORKERS   = 2
 NUM_EPOCHS    = 10
 LEARNING_RATE = 1e-4
 
-TOPK         = 100
-SCORE_THRESH = 0.05  # small threshold to reduce noise in eval
+TOPK          = 100
+SCORE_THRESH  = 0.05
 
 # -----------------------------
 # Experiment controls
 # -----------------------------
-ENABLE_SCALES     = False          # keep off for ViNDr; add later if needed
 REPEATS_PER_SCALE = 1
-CURVE_THRESHOLDS  = None           # None -> default grid inside metrics_curves
+CURVE_THRESHOLDS  = None  # use defaults inside metrics_curves
+
+# Expected inputs (from coco_converter.py)
+TRAIN_JSON_BASE = os.path.join(ANNO_DIR, "train_annotations_coco.json")
+TEST_JSON       = os.path.join(ANNO_DIR, "test_annotations_coco.json")
+
+# Outputs produced here (split train → train_split / val)
+TRAIN_SPLIT_JSON = os.path.join(ANNO_DIR, "train_annotations_coco_split.json")
+VAL_JSON         = os.path.join(ANNO_DIR, "val_annotations_coco.json")
 
 
 def _load_json(p: str) -> Dict[str, Any]:
@@ -76,8 +68,7 @@ def _ensure_train_val_split(
     seed: int = 42,
 ) -> Tuple[str, str]:
     """
-    Create a val split from train if not present.
-    Splits at image level. Keeps all categories as-is.
+    Create a val split from train if not present (split at image level).
     """
     if os.path.exists(out_train_split_json) and os.path.exists(out_val_json):
         return out_train_split_json, out_val_json
@@ -119,7 +110,7 @@ def main():
     print(f"cwd: {os.getcwd()}")
     os.makedirs(WEIGHTS_DIR, exist_ok=True)
 
-    # Make/ensure a small validation split from train
+    # Ensure split files exist
     train_split_json, val_json = _ensure_train_val_split(
         TRAIN_JSON_BASE, TRAIN_SPLIT_JSON, VAL_JSON, val_ratio=0.1, seed=42
     )
@@ -127,13 +118,18 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
 
-    # Load class names from the (split) train JSON
+    # Image dirs on Drive
+    TRAIN_IMG_DIR = os.path.join(IMAGE_ROOT, "train")
+    VAL_IMG_DIR   = os.path.join(IMAGE_ROOT, "train")  # val JSON picks subset
+    TEST_IMG_DIR  = os.path.join(IMAGE_ROOT, "test")
+
+    # Load class names from split train JSON
     class_names = _load_category_names(train_split_json)
     num_classes = len(class_names)
     print(f"classes ({num_classes}): {class_names}")
 
     for rep in range(1, REPEATS_PER_SCALE + 1):
-        # Per-run W&B and weights directory
+        # W&B + run dir
         run_name = f"detr_vindr_{datetime.now(ZoneInfo('America/Los_Angeles')).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         wandb.init(
             project="detr-vindr-pcxr",
@@ -144,9 +140,6 @@ def main():
                 "lr": LEARNING_RATE,
                 "model": MODEL_NAME,
                 "classes": class_names,
-                "train_img_dir": TRAIN_IMG_DIR,
-                "val_img_dir": VAL_IMG_DIR,
-                "test_img_dir": TEST_IMG_DIR,
             }
         )
         run_dir = os.path.join(WEIGHTS_DIR, run_name)
@@ -200,7 +193,7 @@ def main():
             class_names=class_names,
         )
 
-        # Export threshold curves from TEST
+        # Export threshold curves (on test)
         out_dir = os.path.join("analysis", "scale_100", f"rep_{rep}")
         curves = export_threshold_curves(
             model=model,
@@ -227,6 +220,7 @@ def main():
 
     print("\nAll done. Curves under ./analysis/scale_100/rep_<n>/")
     print("Weights saved under ./weights/<run_name>/best.pth")
+
 
 if __name__ == "__main__":
     main()
