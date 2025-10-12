@@ -10,8 +10,9 @@ from transformers import DetrImageProcessor
 from pycocotools.coco import COCO
 import wandb
 
-# Import only evaluation (avoid circular training import)
+# Import only evaluation (avoid circular import)
 from test import evaluate_model
+
 
 # -----------------------------
 # Dataset used for TRAIN/VAL
@@ -21,7 +22,7 @@ class SimpleCocoDataset(Dataset):
         self.coco = COCO(anno_file)
         self.img_folder = img_folder
         self.processor = processor
-        # KEEP ALL IMAGES (even with zero anns → valid negatives)
+        # KEEP ALL IMAGES (even those with zero annotations)
         self.ids = list(self.coco.imgs.keys())
         print(f"[Dataset] {os.path.basename(img_folder)}: {len(self.ids)} images (incl. empty)")
 
@@ -33,13 +34,12 @@ class SimpleCocoDataset(Dataset):
         img_info = self.coco.loadImgs(img_id)[0]
         img_path = os.path.join(self.img_folder, img_info['file_name'])
 
-        # Robust open (skip corrupted/missing)
         image = Image.open(img_path).convert("RGB")
+        W, H = image.size
 
-        # Use GT width/height if present; else from image
-        W = img_info.get("width"); H = img_info.get("height")
-        if W is None or H is None:
-            W, H = image.size
+        # If COCO width/height missing, update our local view (doesn't write file)
+        if not img_info.get("width") or not img_info.get("height"):
+            img_info["width"], img_info["height"] = W, H
 
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
@@ -47,7 +47,6 @@ class SimpleCocoDataset(Dataset):
         boxes, labels = [], []
         for ann in anns:
             x, y, w, h = ann['bbox']
-            # normalize to cx,cy,w,h in [0,1]
             cx = (x + w / 2.0) / W
             cy = (y + h / 2.0) / H
             w_n = w / W
@@ -58,7 +57,7 @@ class SimpleCocoDataset(Dataset):
                 max(0.0, min(1.0, w_n)),
                 max(0.0, min(1.0, h_n)),
             ])
-            # COCO ids are 1..K, model expects 0..K-1
+            # COCO category ids are 1..K; DETR expects 0..K-1
             labels.append(ann['category_id'] - 1)
 
         encoding = self.processor(images=image, return_tensors="pt")
@@ -70,10 +69,12 @@ class SimpleCocoDataset(Dataset):
         }
         return pixel_values, target
 
+
 def collate_fn(batch):
     pixel_values = torch.stack([item[0] for item in batch])
     targets = [item[1] for item in batch]
     return pixel_values, targets
+
 
 # -----------------------------
 # Training helpers
@@ -99,6 +100,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch_idx):
             wandb.log({"train/loss": loss.item(), "epoch": epoch_idx + 1})
 
     return total_loss / max(1, len(dataloader))
+
 
 # -----------------------------
 # Train + validate each epoch
@@ -198,3 +200,4 @@ def train_and_validate(
             print(f"[Best] New best mAP={best_map:.4f} at epoch {best_epoch}. Saved best.pth")
 
     return best_epoch, best_metrics
+=
