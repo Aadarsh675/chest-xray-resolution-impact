@@ -33,8 +33,13 @@ class SimpleCocoDataset(Dataset):
         img_info = self.coco.loadImgs(img_id)[0]
         img_path = os.path.join(self.img_folder, img_info['file_name'])
 
+        # Robust open (skip corrupted/missing)
         image = Image.open(img_path).convert("RGB")
-        W, H = image.size
+
+        # Use GT width/height if present; else from image
+        W = img_info.get("width"); H = img_info.get("height")
+        if W is None or H is None:
+            W, H = image.size
 
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
@@ -42,6 +47,7 @@ class SimpleCocoDataset(Dataset):
         boxes, labels = [], []
         for ann in anns:
             x, y, w, h = ann['bbox']
+            # normalize to cx,cy,w,h in [0,1]
             cx = (x + w / 2.0) / W
             cy = (y + h / 2.0) / H
             w_n = w / W
@@ -52,7 +58,8 @@ class SimpleCocoDataset(Dataset):
                 max(0.0, min(1.0, w_n)),
                 max(0.0, min(1.0, h_n)),
             ])
-            labels.append(ann['category_id'] - 1)  # COCO 1..K → 0..K-1
+            # COCO ids are 1..K, model expects 0..K-1
+            labels.append(ann['category_id'] - 1)
 
         encoding = self.processor(images=image, return_tensors="pt")
         pixel_values = encoding["pixel_values"].squeeze(0)
