@@ -349,7 +349,15 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
         disp.plot(ax=ax, xticks_rotation=45, cmap="Blues", colorbar=False)
         ax.set_title("Confusion Matrix — Image-level (GT first ann vs top pred)")
         plt.tight_layout()
-        plt.show()
+        
+        # Save plot instead of showing
+        plots_dir = os.path.join("data", "plots")
+        os.makedirs(plots_dir, exist_ok=True)
+        plot_filename = "confusion_matrix.png"
+        plot_path = os.path.join(plots_dir, plot_filename)
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        print(f"Saved plot: {plot_path}")
+        plt.close()  # Close the figure to free memory
     else:
         print("Disease confusion matrix: not enough samples in the current class set.")
 
@@ -435,7 +443,15 @@ def visualize_predictions(model, processor, coco_val, img_dir,
         ax.plot([], [], color="yellow", linewidth=2, label="GT box")
         ax.plot([], [], color="red", linewidth=2, label="Pred box")
         ax.legend(loc="upper right")
-        plt.show()
+        
+        # Save plot instead of showing
+        plots_dir = os.path.join("data", "plots")
+        os.makedirs(plots_dir, exist_ok=True)
+        plot_filename = f"prediction_visualization_{img_id}.png"
+        plot_path = os.path.join(plots_dir, plot_filename)
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        print(f"Saved plot: {plot_path}")
+        plt.close()  # Close the figure to free memory
 
 
 # -----------------------------

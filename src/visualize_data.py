@@ -1,5 +1,6 @@
 # visualize_data.py
 import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Iterable, Optional
 
@@ -10,20 +11,30 @@ import matplotlib.ticker as mtick
 from PIL import Image
 import numpy as np
 
+# Add the project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from common.environment import get_environment_config
+
 # =============================
-# CONFIG – edit paths if needed
+# Environment setup
+# =============================
+config = get_environment_config()
+
+# =============================
+# CONFIG – environment-aware paths
 # =============================
 # Labels
-TRAIN_LABELS_CSV = "/content/drive/MyDrive/vindr_pcxr/image_labels_train.csv"
-TEST_LABELS_CSV  = "/content/drive/MyDrive/vindr_pcxr/image_labels_test.csv"
+TRAIN_LABELS_CSV = os.path.join(config['image_root'], "image_labels_train.csv")
+TEST_LABELS_CSV  = os.path.join(config['image_root'], "image_labels_test.csv")
 
 # Annotations (optional; boxes drawn if present)
-TRAIN_ANN_CSV    = "/content/drive/MyDrive/vindr_pcxr/annotations_train.csv"
-TEST_ANN_CSV     = "/content/drive/MyDrive/vindr_pcxr/annotations_test.csv"
+TRAIN_ANN_CSV    = os.path.join(config['image_root'], "annotations_train.csv")
+TEST_ANN_CSV     = os.path.join(config['image_root'], "annotations_test.csv")
 
 # Images (point these to your PNGs)
-TRAIN_IMG_DIR    = "/content/drive/MyDrive/vindr_pcxr/train"
-TEST_IMG_DIR     = "/content/drive/MyDrive/vindr_pcxr/test"
+TRAIN_IMG_DIR    = config['train_img_dir']
+TEST_IMG_DIR     = config['test_img_dir']
 IMAGE_EXT        = ".png"   # change to ".jpg" if needed
 
 # How many examples per split per class
@@ -194,7 +205,15 @@ def plot_hist_normalized(img_to_labels: Dict[str, set], classes: List[str], spli
         plt.text(x, p + 0.005, f"{int(c)}\n({p*100:.1f}%)", ha="center", va="bottom", fontsize=8)
 
     plt.tight_layout()
-    plt.show()
+    
+    # Save plot instead of showing
+    plots_dir = os.path.join(config['data_root'], 'plots')
+    os.makedirs(plots_dir, exist_ok=True)
+    plot_filename = f"{split_name.lower()}_label_distribution.png"
+    plot_path = os.path.join(plots_dir, plot_filename)
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    print(f"Saved plot: {plot_path}")
+    plt.close()  # Close the figure to free memory
 
 def plot_examples_combined(
     train_map: Optional[Dict[str, set]],
@@ -246,12 +265,30 @@ def plot_examples_combined(
 
         fig.suptitle(f"{cls} — {len(train_ids)} train + {len(test_ids)} test", fontsize=12)
         plt.tight_layout()
-        plt.show()
+        
+        # Save plot instead of showing
+        plots_dir = os.path.join(config['data_root'], 'plots')
+        os.makedirs(plots_dir, exist_ok=True)
+        plot_filename = f"examples_{cls.replace(' ', '_').replace('/', '_')}.png"
+        plot_path = os.path.join(plots_dir, plot_filename)
+        plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+        print(f"Saved plot: {plot_path}")
+        plt.close()  # Close the figure to free memory
 
 # =============================
 # Main
 # =============================
 def main():
+    print("=" * 60)
+    print("DATA VISUALIZATION")
+    print("=" * 60)
+    print(f"Looking for data files:")
+    print(f"  Train labels: {TRAIN_LABELS_CSV}")
+    print(f"  Test labels: {TEST_LABELS_CSV}")
+    print(f"  Train images: {TRAIN_IMG_DIR}")
+    print(f"  Test images: {TEST_IMG_DIR}")
+    print("=" * 60)
+    
     # Read labels (skip gracefully if one side missing)
     df_train = _read_csv_safely(TRAIN_LABELS_CSV)
     df_test  = _read_csv_safely(TEST_LABELS_CSV)
@@ -262,18 +299,30 @@ def main():
 
     if df_train is not None:
         train_map, classes = _prepare_labels(df_train)
+        print(f"[OK] Loaded train labels: {len(train_map)} images")
+    else:
+        print("[MISSING] No train labels found")
+        
     if df_test is not None:
         test_map, classes_test = _prepare_labels(df_test)
         if not classes:  # if train missing, take classes from test
             classes = classes_test
+        print(f"[OK] Loaded test labels: {len(test_map)} images")
+    else:
+        print("[MISSING] No test labels found")
 
     if not classes:
-        print("[ERROR] Could not infer classes from the provided CSVs.")
+        print("\n[ERROR] Could not infer classes from the provided CSVs.")
+        print("Please ensure the CSV files exist and contain the expected columns.")
         return
+
+    print(f"\nFound {len(classes)} classes: {classes}")
 
     # Build annotation indices (draw ALL boxes if present)
     ann_train = _build_ann_index(_read_csv_safely(TRAIN_ANN_CSV))
     ann_test  = _build_ann_index(_read_csv_safely(TEST_ANN_CSV))
+    
+    print(f"Annotation indices: {len(ann_train)} train, {len(ann_test)} test")
 
     # Normalized histograms (only for splits we have)
     if train_map is not None:
