@@ -17,13 +17,14 @@ import matplotlib.patches as patches
 from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
 import wandb
 
+
 # -----------------------------
 # Utilities
 # -----------------------------
 def iou_xyxy(a, b):
     """IoU for boxes in [x1,y1,x2,y2]. a: (4,), b: (N,4) -> (N,)"""
     ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b[:,0], b[:,1], b[:,2], b[:,3]
+    bx1, by1, bx2, by2 = b[:, 0], b[:, 1], b[:, 2], b[:, 3]
     inter_x1 = np.maximum(ax1, bx1)
     inter_y1 = np.maximum(ay1, by1)
     inter_x2 = np.minimum(ax2, bx2)
@@ -36,9 +37,11 @@ def iou_xyxy(a, b):
     union = area_a + area_b - inter + 1e-9
     return inter / union
 
+
 def xywh_to_xyxy(box_xywh):
     x, y, w, h = box_xywh
     return np.array([x, y, x + w, y + h], dtype=np.float32)
+
 
 # -----------------------------
 # Dataset (keeps empty images)
@@ -48,7 +51,7 @@ class SimpleCocoDataset(Dataset):
         self.coco = COCO(anno_file)
         self.img_folder = img_folder
         self.processor = processor
-        self.ids = list(self.coco.imgs.keys())  # KEEP ALL IMAGES
+        self.ids = list(self.coco.imgs.keys())  # keep all images
         print(f"[Dataset] {os.path.basename(img_folder)}: {len(self.ids)} images (incl. empty)")
 
     def __len__(self):
@@ -61,6 +64,10 @@ class SimpleCocoDataset(Dataset):
 
         image = Image.open(img_path).convert("RGB")
         W, H = image.size
+
+        # Fill missing dims just in case
+        if not img_info.get("width") or not img_info.get("height"):
+            img_info["width"], img_info["height"] = W, H
 
         ann_ids = self.coco.getAnnIds(imgIds=img_id)
         anns = self.coco.loadAnns(ann_ids)
@@ -87,10 +94,12 @@ class SimpleCocoDataset(Dataset):
         }
         return pixel_values, target
 
+
 def collate_fn(batch):
     pixel_values = torch.stack([item[0] for item in batch])
     targets = [item[1] for item in batch]
     return pixel_values, targets
+
 
 # -----------------------------
 # Evaluation (COCO + extras + per-class AP)
@@ -180,7 +189,7 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
 
             # localization diffs on matched pairs
             if scores.numel() > 0 and len(anns) > 0:
-                pred_xyxy = np.stack([boxes[:,0], boxes[:,1], boxes[:,0]+boxes[:,2], boxes[:,1]+boxes[:,3]], axis=1)
+                pred_xyxy = np.stack([boxes[:, 0], boxes[:, 1], boxes[:, 0] + boxes[:, 2], boxes[:, 1] + boxes[:, 3]], axis=1)
                 used_pred = set()
                 for ann in anns:
                     gx, gy, gw, gh = ann["bbox"]
@@ -193,14 +202,14 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
 
                     iou_list.append(float(ious[k] * 100.0))
                     gt_area = max(1e-6, gw * gh)
-                    pred_area = max(1e-6, (pred_xyxy[k,2]-pred_xyxy[k,0]) * (pred_xyxy[k,3]-pred_xyxy[k,1]))
+                    pred_area = max(1e-6, (pred_xyxy[k, 2] - pred_xyxy[k, 0]) * (pred_xyxy[k, 3] - pred_xyxy[k, 1]))
                     area_mape_list.append(float(abs(pred_area - gt_area) / gt_area * 100.0))
 
     per_class = {}
     if len(results) == 0:
         coco_metrics = {"mAP": 0.0, "AP@50": 0.0, "AP@75": 0.0}
     else:
-        results_file = "val_predictions.json"
+        results_file = "predictions_test.json"
         with open(results_file, "w") as f:
             json.dump(results, f)
         coco_dt = coco_gt.loadRes(results_file)
@@ -245,6 +254,7 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
     })
     return coco_metrics
 
+
 # -----------------------------
 # Confusion matrix + bbox diffs
 # -----------------------------
@@ -252,7 +262,6 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
     device = next(model.parameters()).device
     cat_id_to_name = {c['id']: c['name'] for c in coco_val.dataset['categories']}
 
-    # fallback
     if class_names is None:
         class_names = [cat_id_to_name[cid] for cid in sorted(cat_id_to_name.keys())]
 
@@ -277,7 +286,7 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
         ann_ids = coco_val.getAnnIds(imgIds=img_id)
         anns = coco_val.loadAnns(ann_ids)
         if len(anns) == 0:
-            continue  # skip "No finding" for this image-level confusion matrix
+            continue  # skip images with no GT for this visualization
 
         enc = processor(images=image, return_tensors="pt").to(device)
         with torch.no_grad():
@@ -303,7 +312,7 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
         if len(pred_boxes_xyxy) == 0:
             continue
 
-        px1, py1, px2, py2 = pred_boxes_xyxy[:,0], pred_boxes_xyxy[:,1], pred_boxes_xyxy[:,2], pred_boxes_xyxy[:,3]
+        px1, py1, px2, py2 = pred_boxes_xyxy[:, 0], pred_boxes_xyxy[:, 1], pred_boxes_xyxy[:, 2], pred_boxes_xyxy[:, 3]
         pw = np.maximum(1e-6, px2 - px1)
         ph = np.maximum(1e-6, py2 - py1)
         pred_xywh = np.stack([px1, py1, pw, ph], axis=1)
@@ -318,8 +327,8 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
                 continue
             used_pred.add(j)
 
-            g_cx, g_cy = gx + gw/2.0, gy + gh/2.0
-            p_cx, p_cy = pred_xywh[j,0] + pred_xywh[j,2]/2.0, pred_xywh[j,1] + pred_xywh[j,3]/2.0
+            g_cx, g_cy = gx + gw / 2.0, gy + gh / 2.0
+            p_cx, p_cy = pred_xywh[j, 0] + pred_xywh[j, 2] / 2.0, pred_xywh[j, 1] + pred_xywh[j, 3] / 2.0
 
             dx_pix = abs(g_cx - p_cx); dy_pix = abs(g_cy - p_cy)
             dx_norm = dx_pix / (W + 1e-9); dy_norm = dy_pix / (H + 1e-9)
@@ -327,7 +336,7 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
             loc_dx_abs_pix.append(dx_pix); loc_dy_abs_pix.append(dy_pix)
             loc_dx_abs_norm.append(dx_norm); loc_dy_abs_norm.append(dy_norm)
 
-            dw_pix = abs(gw - pred_xywh[j,2]); dh_pix = abs(gh - pred_xywh[j,3])
+            dw_pix = abs(gw - pred_xywh[j, 2]); dh_pix = abs(gh - pred_xywh[j, 3])
             dw_norm = dw_pix / (W + 1e-9);     dh_norm = dh_pix / (H + 1e-9)
 
             size_dw_abs_pix.append(dw_pix); size_dh_abs_pix.append(dh_pix)
@@ -336,7 +345,7 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
     if len(y_true_dz) > 0:
         cm_dz = confusion_matrix(y_true_dz, y_pred_dz, labels=list(range(len(class_names))))
         disp = ConfusionMatrixDisplay(confusion_matrix=cm_dz, display_labels=class_names)
-        fig, ax = plt.subplots(figsize=(max(8, 0.6*len(class_names)), 7))
+        fig, ax = plt.subplots(figsize=(max(8, 0.6 * len(class_names)), 7))
         disp.plot(ax=ax, xticks_rotation=45, cmap="Blues", colorbar=False)
         ax.set_title("Confusion Matrix — Image-level (GT first ann vs top pred)")
         plt.tight_layout()
@@ -347,9 +356,10 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
     def safe_mean(arr): return float(np.mean(arr)) if len(arr) > 0 else float("nan")
     print("\nAverage bounding-box differences over matched GT–prediction pairs:")
     print(f"  Location | mean |dx| (pixels): {safe_mean(loc_dx_abs_pix):.2f}   |dy| (pixels): {safe_mean(loc_dy_abs_pix):.2f}")
-    print(f"           | mean |dx| (norm W): {safe_mean(loc_dx_abs_norm):.4f}  |dy| (norm H): {safe_mean(loc_dy_abs_norm):.4f}")
+    print(f"           | mean |dx| (norm W): {safe_mean(loc_dx_abs_norm)::.4f}  |dy| (norm H): {safe_mean(loc_dy_abs_norm)::.4f}")
     print(f"  Size     | mean |dw| (pixels): {safe_mean(size_dw_abs_pix):.2f}  |dh| (pixels): {safe_mean(size_dh_abs_pix):.2f}")
-    print(f"           | mean |dw| (norm W): {safe_mean(size_dw_abs_norm):.4f} |dh| (norm H): {safe_mean(size_dh_abs_norm):.4f}")
+    print(f"           | mean |dw| (norm W): {safe_mean(size_dw_abs_norm)::.4f} |dh| (norm H): {safe_mean(size_dh_abs_norm)::.4f}")
+
 
 # -----------------------------
 # Visualization
@@ -427,6 +437,7 @@ def visualize_predictions(model, processor, coco_val, img_dir,
         ax.legend(loc="upper right")
         plt.show()
 
+
 # -----------------------------
 # Convenience: full test run
 # -----------------------------
@@ -472,9 +483,12 @@ def run_test(model, processor, device, num_classes,
             iou_thresh=0.1, max_images=None, class_names=class_names
         )
     if do_viz:
-        visualize_predictions(model, processor, coco_test, test_img_dir, num_images=3, score_thresh=0.0, topk=10, random_sample=True, use_grayscale=True)
+        visualize_predictions(model, processor, coco_test, test_img_dir,
+                              num_images=3, score_thresh=0.0, topk=10,
+                              random_sample=True, use_grayscale=True)
 
     return test_metrics
+
 
 if __name__ == "__main__":
     pass
