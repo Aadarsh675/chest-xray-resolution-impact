@@ -9,7 +9,7 @@ from PIL import Image
 # =========================
 # CONFIG: ViNDr-PCXR paths
 # =========================
-ROOT = Path("/content/drive/MyDrive/vindr_pcxr/physionet.org")
+ROOT = Path("/content/drive/MyDrive/vindr_pcxr/")
 
 TRAIN_CSV = ROOT / "annotations_train.csv"
 TEST_CSV  = ROOT / "annotations_test.csv"
