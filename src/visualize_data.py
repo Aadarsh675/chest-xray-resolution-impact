@@ -6,6 +6,7 @@ from typing import Dict, List, Tuple, Iterable, Optional
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.ticker as mtick
 from PIL import Image
 import numpy as np
 
@@ -31,7 +32,7 @@ N_TEST_PER_CLASS  = 5
 
 # Figure sizing
 TILE_SIZE         = 3.6     # inches per tile
-PIE_FIGSIZE       = (9, 7)
+HIST_FIGSIZE      = (10, 6) # normalized histogram size
 
 # =============================
 # Helpers
@@ -128,7 +129,7 @@ def _build_ann_index(df_ann: Optional[pd.DataFrame]) -> Dict[str, List[dict]]:
     return idx
 
 def _grid(n: int) -> Tuple[int, int]:
-    # up to 10 per class (5 train + 5 test) -> use 2 rows x 5 cols by default
+    # up to 10 per class (5 train + 5 test) -> use rows x cols
     cols = min(5, max(1, n))
     rows = int(np.ceil(n / cols))
     return rows, cols
@@ -157,16 +158,42 @@ def _draw_boxes(ax, boxes: List[dict]):
 # =============================
 # Visualization
 # =============================
-def plot_pie(img_to_labels: Dict[str, set], classes: List[str], split_name: str):
+def _class_counts(img_to_labels: Dict[str, set], classes: List[str]) -> Dict[str, int]:
     counts = {cls: 0 for cls in classes}
     for lbls in img_to_labels.values():
         for l in lbls:
             if l in counts:
                 counts[l] += 1
-    plt.figure(figsize=PIE_FIGSIZE)
-    plt.pie(counts.values(), labels=counts.keys(), autopct='%1.1f%%', startangle=90)
-    plt.title(f'{split_name} label distribution')
-    plt.axis('equal')
+    return counts
+
+def plot_hist_normalized(img_to_labels: Dict[str, set], classes: List[str], split_name: str):
+    """
+    Normalized histogram (bar chart) of class frequencies.
+    Y-axis shows percent; bars sum to 100%.
+    """
+    counts = _class_counts(img_to_labels, classes)
+    total = sum(counts.values())
+    if total == 0:
+        print(f"[WARN] No labels found for {split_name}; skipping histogram.")
+        return
+
+    xs = np.arange(len(classes))
+    vals = np.array([counts[c] for c in classes], dtype=float)
+    perc = vals / total  # 0..1
+
+    plt.figure(figsize=HIST_FIGSIZE)
+    bars = plt.bar(xs, perc)
+    plt.gca().yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+    plt.xticks(xs, classes, rotation=45, ha="right")
+    plt.ylim(0, max(perc.max() * 1.15, 0.05))
+    plt.title(f"{split_name} label distribution (normalized)")
+    plt.ylabel("Percent of labeled images")
+
+    # Annotate each bar with count and percent
+    for x, p, c in zip(xs, perc, vals):
+        plt.text(x, p + 0.005, f"{int(c)}\n({p*100:.1f}%)", ha="center", va="bottom", fontsize=8)
+
+    plt.tight_layout()
     plt.show()
 
 def plot_examples_combined(
@@ -248,11 +275,11 @@ def main():
     ann_train = _build_ann_index(_read_csv_safely(TRAIN_ANN_CSV))
     ann_test  = _build_ann_index(_read_csv_safely(TEST_ANN_CSV))
 
-    # Pies (only for splits we have)
+    # Normalized histograms (only for splits we have)
     if train_map is not None:
-        plot_pie(train_map, classes, "Train")
+        plot_hist_normalized(train_map, classes, "Train")
     if test_map is not None:
-        plot_pie(test_map, classes, "Test")
+        plot_hist_normalized(test_map, classes, "Test")
 
     # Combined per-class panels: 5 from train + 5 from test (by default)
     plot_examples_combined(
