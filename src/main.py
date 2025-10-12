@@ -15,9 +15,23 @@ from metrics_curves import export_threshold_curves
 # -----------------------------
 # Base paths / constants
 # -----------------------------
-DATA_DIR     = "data"
-ANNO_DIR     = os.path.join(DATA_DIR, "annotations")
-IMAGE_DIR    = os.path.join(DATA_DIR, "images")     # expects PNGs in images/{train,test}
+# Your COCO JSONs created by coco_converter.py
+ANNO_DIR        = os.path.join("data", "annotations")
+TRAIN_JSON_BASE = os.path.join(ANNO_DIR, "train_annotations_coco.json")
+TEST_JSON       = os.path.join(ANNO_DIR, "test_annotations_coco.json")
+
+# Where we write the split versions
+TRAIN_SPLIT_JSON = os.path.join(ANNO_DIR, "train_annotations_coco_split.json")
+VAL_JSON         = os.path.join(ANNO_DIR, "val_annotations_coco.json")
+
+# Point these to your actual PNG locations on Drive (or override via env vars)
+DEFAULT_TRAIN_IMG_DIR = "/content/drive/MyDrive/vindr_pcxr/train"
+DEFAULT_TEST_IMG_DIR  = "/content/drive/MyDrive/vindr_pcxr/test"
+
+TRAIN_IMG_DIR = os.environ.get("TRAIN_IMG_DIR", DEFAULT_TRAIN_IMG_DIR)
+VAL_IMG_DIR   = TRAIN_IMG_DIR   # same folder; val is subset of train images
+TEST_IMG_DIR  = os.environ.get("TEST_IMG_DIR",  DEFAULT_TEST_IMG_DIR)
+
 WEIGHTS_DIR  = "weights"
 MODEL_NAME   = "facebook/detr-resnet-50"
 
@@ -35,14 +49,6 @@ SCORE_THRESH = 0.05  # small threshold to reduce noise in eval
 ENABLE_SCALES     = False          # keep off for ViNDr; add later if needed
 REPEATS_PER_SCALE = 1
 CURVE_THRESHOLDS  = None           # None -> default grid inside metrics_curves
-
-# Files expected to exist prior to training (from your converter):
-TRAIN_JSON_BASE = os.path.join(ANNO_DIR, "train_annotations_coco.json")
-TEST_JSON       = os.path.join(ANNO_DIR, "test_annotations_coco.json")
-
-# Files we will create (split train into train_split/val)
-TRAIN_SPLIT_JSON = os.path.join(ANNO_DIR, "train_annotations_coco_split.json")
-VAL_JSON         = os.path.join(ANNO_DIR, "val_annotations_coco.json")
 
 
 def _load_json(p: str) -> Dict[str, Any]:
@@ -121,11 +127,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"device: {device}")
 
-    # Paths (no scaling for now)
-    TRAIN_IMG_DIR = os.path.join(IMAGE_DIR, "train")
-    VAL_IMG_DIR   = os.path.join(IMAGE_DIR, "train")  # same folder; val JSON picks a subset of IDs
-    TEST_IMG_DIR  = os.path.join(IMAGE_DIR, "test")
-
     # Load class names from the (split) train JSON
     class_names = _load_category_names(train_split_json)
     num_classes = len(class_names)
@@ -143,6 +144,9 @@ def main():
                 "lr": LEARNING_RATE,
                 "model": MODEL_NAME,
                 "classes": class_names,
+                "train_img_dir": TRAIN_IMG_DIR,
+                "val_img_dir": VAL_IMG_DIR,
+                "test_img_dir": TEST_IMG_DIR,
             }
         )
         run_dir = os.path.join(WEIGHTS_DIR, run_name)
