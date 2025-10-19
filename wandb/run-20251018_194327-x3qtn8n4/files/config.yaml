@@ -1,0 +1,119 @@
+_wandb:
+    value:
+        cli_version: 0.22.2
+        e:
+            ydgxx9olneerulpkwtogvquzgntfj006:
+                args:
+                    - --mode
+                    - both
+                    - --epochs
+                    - "10"
+                    - --batch-size
+                    - "4"
+                codePath: main.py
+                codePathLocal: main.py
+                cpu_count: 24
+                cpu_count_logical: 24
+                cudaVersion: "12.9"
+                disk:
+                    /:
+                        total: "4066344169472"
+                        used: "1131228422144"
+                email: aadarsh.supe.23@gmail.com
+                executable: C:\Users\aadar\OneDrive\Documents\GitHub\chest-xray-resolution-impact\venv\Scripts\python.exe
+                git:
+                    commit: 872531871135abbf6c7c74db3af1d34b433f16bd
+                    remote: https://github.com/Aadarsh675/chest-xray-resolution-impact.git
+                gpu: NVIDIA GeForce RTX 5090 Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 10496
+                      memoryTotal: "25651314688"
+                      name: NVIDIA GeForce RTX 5090 Laptop GPU
+                      uuid: GPU-c2b4776b-5566-1a31-98b7-dd6040789015
+                host: MSI
+                memory:
+                    total: "68366168064"
+                os: Windows-11-10.0.26200-SP0
+                program: C:\Users\aadar\OneDrive\Documents\GitHub\chest-xray-resolution-impact\main.py
+                python: CPython 3.14.0
+                root: C:\Users\aadar\OneDrive\Documents\GitHub\chest-xray-resolution-impact
+                startedAt: "2025-10-19T02:43:27.824268Z"
+                writerId: ydgxx9olneerulpkwtogvquzgntfj006
+        m: []
+        python_version: 3.14.0
+        t:
+            "1":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 63
+            "2":
+                - 1
+                - 5
+                - 11
+                - 41
+                - 49
+                - 53
+                - 63
+            "3":
+                - 13
+                - 16
+            "4": 3.14.0
+            "5": 0.22.2
+            "6": 4.57.0
+            "8":
+                - 3
+            "12": 0.22.2
+            "13": windows-amd64
+batch_size:
+    value: 4
+classes:
+    value:
+        - Anterior mediastinal mass
+        - Aortic enlargement
+        - Atelectasis
+        - Boot-shaped heart
+        - Bronchectasis
+        - Bronchial thickening
+        - Calcification
+        - Cardiomegaly
+        - Chest wall mass
+        - Clavicle fracture
+        - Consolidation
+        - Dextro cardia
+        - Diffuse aveolar opacity
+        - Edema
+        - Egg on string sign
+        - Emphysema
+        - Enlarged PA
+        - Expanded edges of the anterior ribs
+        - Infiltration
+        - Interstitial lung disease - ILD
+        - Intrathoracic digestive structure
+        - Lung cavity
+        - Lung cyst
+        - Lung hyperinflation
+        - Mediastinal shift
+        - No finding
+        - Other lesion
+        - Other nodule/mass
+        - Other opacity
+        - Paraveterbral mass
+        - Peribronchovascular interstitial opacity
+        - Pleural effusion
+        - Pleural thickening
+        - Pneumothorax
+        - Pulmonary fibrosis
+        - Reticulonodular opacity
+        - Stomach on the right side
+epochs:
+    value: 10
+model:
+    value: facebook/detr-resnet-50
+num_classes:
+    value: 37

@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from PIL import Image
+import matplotlib.pyplot as plt
+import wandb
 
 from pycocotools.coco import COCO
 
@@ -237,5 +239,57 @@ def export_threshold_curves(
                     result["per_class"][cname]["recall"][t_idx],
                     result["per_class"][cname]["miou"][t_idx],
                 ])
+
+    # Create and save visualization plots
+    # 1. Precision vs Threshold for all classes
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for cname in cat_names_sorted:
+        ax.plot(thresholds, result["per_class"][cname]["precision"], label=cname, marker='o')
+    ax.set_xlabel('Confidence Threshold')
+    ax.set_ylabel('Precision')
+    ax.set_title('Precision vs Confidence Threshold')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    precision_path = os.path.join(out_dir, "precision_vs_threshold.png")
+    plt.savefig(precision_path, dpi=150, bbox_inches='tight')
+    print(f"Saved plot: {precision_path}")
+    if wandb.run is not None:
+        wandb.log({"threshold_curves/precision": wandb.Image(precision_path)})
+    plt.close()
+
+    # 2. Recall vs Threshold for all classes
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for cname in cat_names_sorted:
+        ax.plot(thresholds, result["per_class"][cname]["recall"], label=cname, marker='o')
+    ax.set_xlabel('Confidence Threshold')
+    ax.set_ylabel('Recall')
+    ax.set_title('Recall vs Confidence Threshold')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    recall_path = os.path.join(out_dir, "recall_vs_threshold.png")
+    plt.savefig(recall_path, dpi=150, bbox_inches='tight')
+    print(f"Saved plot: {recall_path}")
+    if wandb.run is not None:
+        wandb.log({"threshold_curves/recall": wandb.Image(recall_path)})
+    plt.close()
+
+    # 3. mIoU vs Threshold for all classes
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for cname in cat_names_sorted:
+        ax.plot(thresholds, result["per_class"][cname]["miou"], label=cname, marker='o')
+    ax.set_xlabel('Confidence Threshold')
+    ax.set_ylabel('Mean IoU')
+    ax.set_title('Mean IoU vs Confidence Threshold')
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    miou_path = os.path.join(out_dir, "miou_vs_threshold.png")
+    plt.savefig(miou_path, dpi=150, bbox_inches='tight')
+    print(f"Saved plot: {miou_path}")
+    if wandb.run is not None:
+        wandb.log({"threshold_curves/miou": wandb.Image(miou_path)})
+    plt.close()
 
     return result

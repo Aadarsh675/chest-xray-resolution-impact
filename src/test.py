@@ -96,7 +96,23 @@ class SimpleCocoDataset(Dataset):
 
 
 def collate_fn(batch):
-    pixel_values = torch.stack([item[0] for item in batch])
+    # Images may have different sizes, so we need to pad them
+    # Get max dimensions in batch
+    max_height = max([item[0].shape[1] for item in batch])
+    max_width = max([item[0].shape[2] for item in batch])
+    
+    # Pad all images to max dimensions
+    padded_images = []
+    for item in batch:
+        img = item[0]  # Shape: [3, H, W]
+        h, w = img.shape[1], img.shape[2]
+        
+        # Create padded tensor
+        padded = torch.zeros(3, max_height, max_width, dtype=img.dtype)
+        padded[:, :h, :w] = img
+        padded_images.append(padded)
+    
+    pixel_values = torch.stack(padded_images)
     targets = [item[1] for item in batch]
     return pixel_values, targets
 
@@ -357,6 +373,11 @@ def disease_confusion_and_bbox_diffs(model, processor, coco_val, img_dir, iou_th
         plot_path = os.path.join(plots_dir, plot_filename)
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"Saved plot: {plot_path}")
+        
+        # Log to wandb
+        if wandb.run is not None:
+            wandb.log({"confusion_matrix": wandb.Image(plot_path)})
+        
         plt.close()  # Close the figure to free memory
     else:
         print("Disease confusion matrix: not enough samples in the current class set.")
@@ -451,6 +472,11 @@ def visualize_predictions(model, processor, coco_val, img_dir,
         plot_path = os.path.join(plots_dir, plot_filename)
         plt.savefig(plot_path, dpi=150, bbox_inches='tight')
         print(f"Saved plot: {plot_path}")
+        
+        # Log to wandb
+        if wandb.run is not None:
+            wandb.log({f"prediction_visualization/img_{img_id}": wandb.Image(plot_path)})
+        
         plt.close()  # Close the figure to free memory
 
 
@@ -503,6 +529,65 @@ def run_test(model, processor, device, num_classes,
                               num_images=3, score_thresh=0.0, topk=10,
                               random_sample=True, use_grayscale=True)
 
+    return test_metrics
+
+
+def main(args):
+    """Main entry point for testing from command line arguments."""
+    import os
+    import torch
+    from transformers import DetrForObjectDetection, DetrImageProcessor
+    from pycocotools.coco import COCO
+    
+    # Load configuration
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Set up paths
+    test_anno_file = os.path.join(args.anno_dir, "test_annotations_coco.json")
+    
+    # Load class names
+    coco = COCO(test_anno_file)
+    cats = sorted(coco.loadCats(coco.getCatIds()), key=lambda c: c['id'])
+    class_names = [c['name'] for c in cats]
+    num_classes = len(class_names)
+    print(f"Classes ({num_classes}): {class_names}")
+    
+    # Initialize model
+    MODEL_NAME = "facebook/detr-resnet-50"
+    processor = DetrImageProcessor.from_pretrained(MODEL_NAME)
+    model = DetrForObjectDetection.from_pretrained(
+        MODEL_NAME, num_labels=num_classes, ignore_mismatched_sizes=True
+    ).to(device)
+    
+    # Find most recent weights directory
+    weights_dirs = [d for d in os.listdir(args.weights_dir) if os.path.isdir(os.path.join(args.weights_dir, d))]
+    if not weights_dirs:
+        raise FileNotFoundError(f"No weights found in {args.weights_dir}. Please train a model first.")
+    
+    # Use most recent directory
+    weights_dir = os.path.join(args.weights_dir, sorted(weights_dirs)[-1])
+    print(f"Using weights from: {weights_dir}")
+    
+    # Run test
+    test_metrics = run_test(
+        model=model,
+        processor=processor,
+        device=device,
+        num_classes=num_classes,
+        test_img_dir=args.test_img_dir,
+        test_anno_file=test_anno_file,
+        weights_dir=weights_dir,
+        score_thresh=0.05,
+        topk=100,
+        do_confusion=True,
+        do_viz=True,
+        class_names=class_names,
+    )
+    
+    print(f"\nTesting complete!")
+    print(f"Test metrics: {test_metrics}")
+    
     return test_metrics
 
 

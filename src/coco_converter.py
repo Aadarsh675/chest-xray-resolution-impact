@@ -1,26 +1,35 @@
 # coco_converter.py
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 from PIL import Image
 
+# Add the project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from common.environment import get_environment_config
+
 # =========================
-# CONFIG: ViNDr-PCXR paths
+# CONFIG: ViNDr-PCXR paths (environment-aware)
 # =========================
-ROOT = Path("/content/drive/MyDrive/vindr_pcxr/")
+config = get_environment_config()
+
+ROOT = Path(config['image_root'])
 
 TRAIN_CSV = ROOT / "annotations_train.csv"
 TEST_CSV  = ROOT / "annotations_test.csv"
 
 # These should point to the PNGs your training code will load
-TRAIN_IMG_DIR = ROOT / "train (python)"   # expects <image_id>.png
-TEST_IMG_DIR  = ROOT / "test (python)"
+TRAIN_IMG_DIR = ROOT / "train"   # expects <image_id>.png
+TEST_IMG_DIR  = ROOT / "test"
 IMAGE_EXT = ".png"
 
 # Where to save COCO JSONs used by your pipeline
-OUT_DIR = Path("data/annotations")
+OUT_DIR = Path(config['anno_dir'])
 TRAIN_COCO_JSON = OUT_DIR / "train_annotations_coco.json"
 TEST_COCO_JSON  = OUT_DIR / "test_annotations_coco.json"
 COMBINED_COCO_JSON = OUT_DIR / "annotations_coco_all.json"  # optional

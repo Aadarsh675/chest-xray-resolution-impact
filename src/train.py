@@ -1,5 +1,6 @@
 # train.py
 import os
+import sys
 import json
 from PIL import Image
 
@@ -10,8 +11,11 @@ from transformers import DetrImageProcessor
 from pycocotools.coco import COCO
 import wandb
 
+# Add the project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Import only evaluation (avoid circular import)
-from test import evaluate_model
+from src.test import evaluate_model
 
 
 # -----------------------------
@@ -71,7 +75,23 @@ class SimpleCocoDataset(Dataset):
 
 
 def collate_fn(batch):
-    pixel_values = torch.stack([item[0] for item in batch])
+    # Images may have different sizes, so we need to pad them
+    # Get max dimensions in batch
+    max_height = max([item[0].shape[1] for item in batch])
+    max_width = max([item[0].shape[2] for item in batch])
+    
+    # Pad all images to max dimensions
+    padded_images = []
+    for item in batch:
+        img = item[0]  # Shape: [3, H, W]
+        h, w = img.shape[1], img.shape[2]
+        
+        # Create padded tensor
+        padded = torch.zeros(3, max_height, max_width, dtype=img.dtype)
+        padded[:, :h, :w] = img
+        padded_images.append(padded)
+    
+    pixel_values = torch.stack(padded_images)
     targets = [item[1] for item in batch]
     return pixel_values, targets
 
@@ -200,4 +220,125 @@ def train_and_validate(
             print(f"[Best] New best mAP={best_map:.4f} at epoch {best_epoch}. Saved best.pth")
 
     return best_epoch, best_metrics
-=
+
+
+def main(args):
+    """Main entry point for training from command line arguments."""
+    import os
+    import wandb
+    from transformers import DetrForObjectDetection, DetrImageProcessor
+    import torch
+    from pycocotools.coco import COCO
+    import uuid
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    
+    # Load configuration
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # Set up paths
+    train_anno_file = os.path.join(args.anno_dir, "train_annotations_coco.json")
+    val_anno_file = os.path.join(args.anno_dir, "val_annotations_coco.json")
+    
+    # Check if val file exists, if not create split
+    if not os.path.exists(val_anno_file):
+        print("[INFO] Validation split not found, creating from train...")
+        import json
+        import random
+        
+        # Load and split the training data
+        with open(train_anno_file, 'r') as f:
+            data = json.load(f)
+        
+        images = data.get("images", [])
+        anns = data.get("annotations", [])
+        cats = data.get("categories", [])
+        
+        img_ids = [im["id"] for im in images]
+        random.Random(42).shuffle(img_ids)
+        n_val = max(1, int(round(len(img_ids) * 0.1)))
+        val_ids = set(img_ids[:n_val])
+        train_ids = set(img_ids[n_val:])
+        
+        # Create splits
+        train_imgs = [im for im in images if im["id"] in train_ids]
+        train_anns = [a for a in anns if a["image_id"] in train_ids]
+        val_imgs = [im for im in images if im["id"] in val_ids]
+        val_anns = [a for a in anns if a["image_id"] in val_ids]
+        
+        # Reassign annotation ids
+        for i, a in enumerate(train_anns, 1): a["id"] = i
+        for i, a in enumerate(val_anns, 1): a["id"] = i
+        
+        train_split = {"info": {}, "licenses": [], "images": train_imgs, "annotations": train_anns, "categories": cats}
+        val_split = {"info": {}, "licenses": [], "images": val_imgs, "annotations": val_anns, "categories": cats}
+        
+        train_split_json = os.path.join(args.anno_dir, "train_annotations_coco_split.json")
+        with open(train_split_json, "w") as f:
+            json.dump(train_split, f, indent=2)
+        with open(val_anno_file, "w") as f:
+            json.dump(val_split, f, indent=2)
+        
+        print(f"[Split] Wrote train split -> {train_split_json} ({len(train_imgs)} imgs)")
+        print(f"[Split] Wrote val split -> {val_anno_file} ({len(val_imgs)} imgs)")
+        
+        train_anno_file = train_split_json
+    
+    # Load class names
+    coco = COCO(train_anno_file)
+    cats = sorted(coco.loadCats(coco.getCatIds()), key=lambda c: c['id'])
+    class_names = [c['name'] for c in cats]
+    num_classes = len(class_names)
+    print(f"Classes ({num_classes}): {class_names}")
+    
+    # Initialize model
+    MODEL_NAME = "facebook/detr-resnet-50"
+    processor = DetrImageProcessor.from_pretrained(MODEL_NAME)
+    model = DetrForObjectDetection.from_pretrained(
+        MODEL_NAME, num_labels=num_classes, ignore_mismatched_sizes=True
+    ).to(device)
+    
+    # Initialize wandb
+    run_name = f"detr_vindr_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    wandb.init(
+        project="chest-xray-resolution-impact",
+        name=run_name,
+        config={
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "model": MODEL_NAME,
+            "classes": class_names,
+            "num_classes": num_classes,
+        }
+    )
+    
+    # Create weights directory
+    weights_dir = os.path.join(args.weights_dir, run_name)
+    os.makedirs(weights_dir, exist_ok=True)
+    
+    # Train
+    best_epoch, best_metrics = train_and_validate(
+        model=model,
+        processor=processor,
+        device=device,
+        num_classes=num_classes,
+        train_img_dir=args.train_img_dir,
+        train_anno_file=train_anno_file,
+        val_img_dir=args.val_img_dir,
+        val_anno_file=val_anno_file,
+        weights_dir=weights_dir,
+        num_epochs=args.epochs,
+        batch_size=args.batch_size,
+        num_workers=2,
+        learning_rate=1e-4,
+        score_thresh=0.05,
+        topk=100,
+    )
+    
+    print(f"\nTraining complete! Best epoch: {best_epoch}")
+    print(f"Weights saved to: {weights_dir}")
+    
+    wandb.finish()
+    
+    return best_epoch, best_metrics
