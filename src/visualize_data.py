@@ -21,6 +21,12 @@ from common.environment import get_environment_config
 # =============================
 config = get_environment_config()
 
+# Google Drive plots directory (if in Colab)
+if config['is_colab']:
+    DRIVE_PLOTS_DIR = Path('/content/drive/MyDrive/chest-xray-plots')
+else:
+    DRIVE_PLOTS_DIR = None
+
 # =============================
 # CONFIG – environment-aware paths
 # =============================
@@ -48,6 +54,71 @@ HIST_FIGSIZE      = (10, 6) # normalized histogram size
 # =============================
 # Helpers
 # =============================
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+def _copy_plots_from_drive(plots_dir: str) -> bool:
+    """Copy all plots from Google Drive if they exist there."""
+    if not DRIVE_PLOTS_DIR or not DRIVE_PLOTS_DIR.exists():
+        return False
+    
+    try:
+        _ensure_dir(Path(plots_dir))
+        copied_count = 0
+        
+        # Copy all PNG files from Drive plots directory
+        for plot_file in DRIVE_PLOTS_DIR.glob("*.png"):
+            local_plot = Path(plots_dir) / plot_file.name
+            # Copy file
+            import shutil
+            shutil.copy2(plot_file, local_plot)
+            copied_count += 1
+            print(f"[OK] Copied plot from Drive: {plot_file.name}")
+        
+        if copied_count > 0:
+            print(f"[INFO] Successfully copied {copied_count} plots from Google Drive!")
+            return True
+        else:
+            print("[INFO] No plots found in Google Drive")
+            return False
+            
+    except Exception as e:
+        print(f"[WARNING] Failed to copy plots from Drive: {e}")
+        return False
+
+def _copy_plots_to_drive(plots_dir: str):
+    """Copy all plots to Google Drive if in Colab."""
+    if not DRIVE_PLOTS_DIR:
+        return
+    
+    try:
+        _ensure_dir(DRIVE_PLOTS_DIR)
+        plots_path = Path(plots_dir)
+        
+        if not plots_path.exists():
+            return
+            
+        copied_count = 0
+        for plot_file in plots_path.glob("*.png"):
+            drive_plot = DRIVE_PLOTS_DIR / plot_file.name
+            import shutil
+            shutil.copy2(plot_file, drive_plot)
+            copied_count += 1
+        
+        if copied_count > 0:
+            print(f"[OK] Copied {copied_count} plots to Google Drive: {DRIVE_PLOTS_DIR}")
+            
+    except Exception as e:
+        print(f"[WARNING] Failed to copy plots to Drive: {e}")
+
+def _check_plots_exist(plots_dir: str) -> bool:
+    """Check if plots directory exists and contains PNG files."""
+    plots_path = Path(plots_dir)
+    if not plots_path.exists():
+        return False
+    
+    png_files = list(plots_path.glob("*.png"))
+    return len(png_files) > 0
 def _read_csv_safely(path: str) -> Optional[pd.DataFrame]:
     try:
         return pd.read_csv(path, sep=None, engine="python")
@@ -278,7 +349,32 @@ def plot_examples_combined(
 # =============================
 # Main
 # =============================
-def main():
+def main(skip_if_exists=True):
+    """
+    Main entry point for data visualization.
+    
+    Args:
+        skip_if_exists: If True, skip generation if plots already exist
+    """
+    plots_dir = os.path.join(config['data_root'], 'plots')
+    
+    # First, try to copy from Google Drive if plots exist there
+    if skip_if_exists and DRIVE_PLOTS_DIR:
+        print("[INFO] Checking Google Drive for existing plots...")
+        if _copy_plots_from_drive(plots_dir):
+            print("[INFO] Successfully loaded plots from Google Drive!")
+            print(f"  Plots directory: {plots_dir}")
+            print("[INFO] Skipping plot generation. Using plots from Google Drive.")
+            return
+    
+    # Check if plots already exist locally
+    if skip_if_exists and _check_plots_exist(plots_dir):
+        print("[INFO] Plots already exist locally!")
+        print(f"  Plots directory: {plots_dir}")
+        print("[INFO] Skipping plot generation. Using existing plots.")
+        print("[INFO] To force regeneration, call with skip_if_exists=False")
+        return
+    
     print("=" * 60)
     print("DATA VISUALIZATION")
     print("=" * 60)
@@ -338,6 +434,18 @@ def main():
         n_train=N_TRAIN_PER_CLASS,
         n_test=N_TEST_PER_CLASS
     )
+    
+    # Copy plots to Google Drive for persistence
+    plots_dir = os.path.join(config['data_root'], 'plots')
+    _copy_plots_to_drive(plots_dir)
+    
+    print("\n" + "="*60)
+    print("PLOT GENERATION COMPLETE")
+    print("="*60)
+    print(f"Plots saved to: {plots_dir}")
+    if DRIVE_PLOTS_DIR:
+        print(f"Plots also saved to Google Drive: {DRIVE_PLOTS_DIR}")
+    print("="*60)
 
 if __name__ == "__main__":
     main()
