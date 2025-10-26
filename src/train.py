@@ -204,16 +204,33 @@ def train_and_validate(
                 ap50 = cls_metrics["AP50"]
                 print(f"  - {cls_name:20s} AP={ap:.4f} | AP50={ap50:.4f}")
 
-        # Log to W&B
+        # Log to W&B with comprehensive metrics
         if wandb.run is not None:
-            wandb.log({**{f"val/{k}": v for k, v in val_metrics.items() if k != "per_class"}, "epoch": epoch + 1})
+            # Main validation metrics
+            val_log = {
+                "val/mAP": val_metrics.get("mAP", 0.0),
+                "val/AP@50": val_metrics.get("AP@50", 0.0),
+                "val/AP@75": val_metrics.get("AP@75", 0.0),
+                "val/Disease_Accuracy": val_metrics.get("disease_acc_pct", 0.0),
+                "val/BBox_IoU_Mean": val_metrics.get("bbox_iou_mean_pct", 0.0),
+                "val/BBox_Area_MAPE": val_metrics.get("bbox_area_mape_pct", 0.0),
+                "val/Matched_Pairs": val_metrics.get("matched_pairs", 0),
+                "epoch": epoch + 1
+            }
+            wandb.log(val_log)
+            
+            # Per-class metrics for each disease
             if val_metrics.get("per_class"):
-                log_dict = {}
+                per_class_log = {}
                 for cls_name, cls_metrics in val_metrics["per_class"].items():
-                    log_dict[f"val/AP/{cls_name}"] = cls_metrics["AP"]
-                    log_dict[f"val/AP50/{cls_name}"] = cls_metrics["AP50"]
-                log_dict["epoch"] = epoch + 1
-                wandb.log(log_dict)
+                    per_class_log[f"val/AP/{cls_name}"] = cls_metrics.get("AP", 0.0)
+                    per_class_log[f"val/AP50/{cls_name}"] = cls_metrics.get("AP50", 0.0)
+                    per_class_log[f"val/Precision/{cls_name}"] = cls_metrics.get("precision", 0.0)
+                    per_class_log[f"val/Recall/{cls_name}"] = cls_metrics.get("recall", 0.0)
+                    per_class_log[f"val/F1/{cls_name}"] = cls_metrics.get("f1", 0.0)
+                    per_class_log[f"val/mIoU/{cls_name}"] = cls_metrics.get("miou", 0.0)
+                per_class_log["epoch"] = epoch + 1
+                wandb.log(per_class_log)
 
         # Save snapshot
         os.makedirs(weights_dir, exist_ok=True)

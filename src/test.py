@@ -250,9 +250,12 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
         }
 
         precisions = coco_eval.eval['precision']  # [T, R, K, A, M]
+        recalls = coco_eval.eval['recall']  # [T, K, A, M]
         iou_thrs = coco_eval.params.iouThrs
         cats = coco_gt.loadCats(coco_gt.getCatIds())
+        
         for k, cat in enumerate(cats):
+            # AP metrics
             p = precisions[:, :, k, 0, -1]
             p = p[p > -1]
             ap = float(np.mean(p)) if p.size else float('nan')
@@ -264,8 +267,41 @@ def evaluate_model(model, dataloader, coco_gt, device, num_classes, img_dir,
                 ap50 = float(np.mean(p50)) if p50.size else float('nan')
             else:
                 ap50 = float('nan')
+            
+            # Precision and Recall at IoU=0.5
+            t_50_idx = np.where(np.isclose(iou_thrs, 0.5))[0]
+            if t_50_idx.size:
+                precision_50 = precisions[t_50_idx[0], :, k, 0, -1]
+                precision_50 = precision_50[precision_50 > -1]
+                precision_50 = float(np.mean(precision_50)) if precision_50.size else 0.0
+                
+                recall_50 = recalls[t_50_idx[0], k, 0, -1]
+                recall_50 = recall_50[recall_50 > -1]
+                recall_50 = float(np.mean(recall_50)) if recall_50.size else 0.0
+            else:
+                precision_50 = 0.0
+                recall_50 = 0.0
+            
+            # F1 score
+            f1_50 = 2 * (precision_50 * recall_50) / (precision_50 + recall_50 + 1e-9)
+            
+            # mIoU calculation (average IoU across all IoU thresholds)
+            ious = []
+            for t_idx in range(len(iou_thrs)):
+                p_t = precisions[t_idx, :, k, 0, -1]
+                p_t = p_t[p_t > -1]
+                if p_t.size > 0:
+                    ious.append(float(np.mean(p_t)))
+            miou = float(np.mean(ious)) if ious else 0.0
 
-            per_class[cat['name']] = {"AP": ap, "AP50": ap50}
+            per_class[cat['name']] = {
+                "AP": ap, 
+                "AP50": ap50,
+                "precision": precision_50,
+                "recall": recall_50,
+                "f1": f1_50,
+                "miou": miou
+            }
 
     disease_acc = float(np.mean(np.array(y_true_dz) == np.array(y_pred_dz)) * 100.0) if len(y_true_dz) else 0.0
     bbox_iou_mean_pct = float(np.mean(iou_list)) if len(iou_list) else 0.0
@@ -521,13 +557,45 @@ def run_test(model, processor, device, num_classes,
     print(f"[TEST] metrics: {test_metrics}")
 
     if wandb.run is not None:
-        wandb.log({f"test/{k}": v for k, v in test_metrics.items() if k != "per_class"})
+        # Log main test metrics
+        main_metrics = {
+            "test/mAP": test_metrics.get("mAP", 0.0),
+            "test/AP@50": test_metrics.get("AP@50", 0.0), 
+            "test/AP@75": test_metrics.get("AP@75", 0.0),
+            "test/Disease_Accuracy": test_metrics.get("disease_acc_pct", 0.0),
+            "test/BBox_IoU_Mean": test_metrics.get("bbox_iou_mean_pct", 0.0),
+            "test/BBox_Area_MAPE": test_metrics.get("bbox_area_mape_pct", 0.0),
+            "test/Matched_Pairs": test_metrics.get("matched_pairs", 0),
+        }
+        wandb.log(main_metrics)
+        
+        # Log per-class metrics with comprehensive breakdown
         if test_metrics.get("per_class"):
             per_cls_log = {}
             for cls_name, cls_metrics in test_metrics["per_class"].items():
+                # AP metrics
                 per_cls_log[f"test/AP/{cls_name}"] = cls_metrics["AP"]
                 per_cls_log[f"test/AP50/{cls_name}"] = cls_metrics["AP50"]
+                
+                # Additional metrics for paper analysis
+                per_cls_log[f"test/Precision/{cls_name}"] = cls_metrics.get("precision", 0.0)
+                per_cls_log[f"test/Recall/{cls_name}"] = cls_metrics.get("recall", 0.0)
+                per_cls_log[f"test/F1/{cls_name}"] = cls_metrics.get("f1", 0.0)
+                per_cls_log[f"test/mIoU/{cls_name}"] = cls_metrics.get("miou", 0.0)
+                
             wandb.log(per_cls_log)
+            
+        # Log comprehensive summary metrics for paper
+        summary_metrics = {
+            "test/mAP": test_metrics.get("mAP", 0.0),
+            "test/AP50": test_metrics.get("AP@50", 0.0), 
+            "test/AP75": test_metrics.get("AP@75", 0.0),
+            "test/Disease_Accuracy": test_metrics.get("disease_acc_pct", 0.0),
+            "test/BBox_IoU_Mean": test_metrics.get("bbox_iou_mean_pct", 0.0),
+            "test/BBox_Area_MAPE": test_metrics.get("bbox_area_mape_pct", 0.0),
+            "test/Matched_Pairs": test_metrics.get("matched_pairs", 0),
+        }
+        wandb.log(summary_metrics)
 
     if do_confusion:
         disease_confusion_and_bbox_diffs(
