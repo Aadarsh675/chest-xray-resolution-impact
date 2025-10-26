@@ -85,19 +85,29 @@ class SimpleCocoDataset(Dataset):
 
 
 def collate_fn(batch):
-    # Images may have different sizes, so we need to pad them
+    """
+    Collate function that handles variable-sized images.
+    DETR's processor already normalizes images, so we just need to handle batching.
+    We'll pad to the maximum size in the batch for efficiency.
+    """
     # Get max dimensions in batch
     max_height = max([item[0].shape[1] for item in batch])
     max_width = max([item[0].shape[2] for item in batch])
     
-    # Pad all images to max dimensions
+    # Ensure dimensions are multiples of 32 for better GPU efficiency
+    max_height = ((max_height + 31) // 32) * 32
+    max_width = ((max_width + 31) // 32) * 32
+    
+    # Pad all images to max dimensions (use mean pixel value instead of zeros)
+    batch_mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)  # ImageNet mean
     padded_images = []
+    
     for item in batch:
         img = item[0]  # Shape: [3, H, W]
         h, w = img.shape[1], img.shape[2]
         
-        # Create padded tensor
-        padded = torch.zeros(3, max_height, max_width, dtype=img.dtype)
+        # Create padded tensor with mean values (better than zeros)
+        padded = batch_mean.repeat(1, max_height, max_width)
         padded[:, :h, :w] = img
         padded_images.append(padded)
     
@@ -112,6 +122,8 @@ def collate_fn(batch):
 def train_one_epoch(model, dataloader, optimizer, device, epoch_idx):
     model.train()
     total_loss = 0.0
+    global_step = epoch_idx * len(dataloader)  # Track global step for proper logging
+    
     for batch_idx, (pixel_values, targets) in enumerate(dataloader):
         pixel_values = pixel_values.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
@@ -121,13 +133,27 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch_idx):
 
         optimizer.zero_grad()
         loss.backward()
+        
+        # Clip gradients to prevent exploding gradients (common in transformer models)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
         optimizer.step()
 
         total_loss += loss.item()
+        
+        # Calculate global step for consistent logging
+        current_step = global_step + batch_idx
+        
         if batch_idx % 10 == 0:
             print(f"[Train] Epoch {epoch_idx+1} | Batch {batch_idx+1}/{len(dataloader)} | Loss: {loss.item():.4f}")
+        
+        # Log to wandb every batch with proper step tracking
         if wandb.run is not None:
-            wandb.log({"train/loss": loss.item(), "epoch": epoch_idx + 1})
+            wandb.log({
+                "train/batch_loss": loss.item(),
+                "train/epoch": epoch_idx + 1,
+                "train/learning_rate": optimizer.param_groups[0]['lr']
+            }, step=current_step)
 
     return total_loss / max(1, len(dataloader))
 
@@ -172,8 +198,11 @@ def train_and_validate(
         collate_fn=collate_fn, num_workers=num_workers, pin_memory=True
     )
 
-    # Optimizer
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+    # Optimizer with weight decay for better regularization
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
+    
+    # Learning rate scheduler (cosine annealing for better convergence)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
 
     # COCO GT for validation and test
     coco_val = COCO(val_anno_file)
@@ -296,6 +325,13 @@ def train_and_validate(
             with open(os.path.join(weights_dir, "best_metrics.json"), "w") as f:
                 json.dump({"epoch": best_epoch, "metrics": best_metrics}, f, indent=2)
             print(f"[Best] New best test mAP={best_map:.4f} at epoch {best_epoch}. Saved best.pth")
+        
+        # Step scheduler at the end of each epoch
+        scheduler.step()
+        
+        # Log learning rate after scheduler step
+        if wandb.run is not None:
+            wandb.log({"learning_rate": scheduler.get_last_lr()[0], "epoch": epoch + 1})
 
     return best_epoch, best_metrics
 
@@ -419,7 +455,7 @@ def main(args, wandb_run=None):
         num_epochs=args.epochs,
         batch_size=args.batch_size,
         num_workers=2,
-        learning_rate=1e-4,
+        learning_rate=5e-5,  # Reduced from 1e-4 for more stable training
         score_thresh=0.05,
         topk=100,
     )
