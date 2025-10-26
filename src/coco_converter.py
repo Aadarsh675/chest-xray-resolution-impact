@@ -120,25 +120,53 @@ def _img_size(img_dir: Path, image_id: str, ext: str = IMAGE_EXT, cache: dict = 
         return None
 
 def _load_dimension_cache() -> dict:
-    """Load cached image dimensions from disk."""
+    """Load cached image dimensions from disk, checking Google Drive first."""
+    # First try to load from Google Drive if available
+    if DRIVE_OUT_DIR:
+        drive_cache_file = DRIVE_OUT_DIR / "image_dimensions_cache.pkl"
+        if drive_cache_file.exists():
+            try:
+                with open(drive_cache_file, 'rb') as f:
+                    cache = pickle.load(f)
+                print(f"[INFO] Loading image dimensions from Google Drive cache: {drive_cache_file}")
+                # Also copy to local for faster access next time
+                _ensure_dir(DIMENSION_CACHE_FILE.parent)
+                with open(DIMENSION_CACHE_FILE, 'wb') as f:
+                    pickle.dump(cache, f)
+                return cache
+            except Exception as e:
+                print(f"[WARNING] Failed to load cache from Drive: {e}. Trying local cache.")
+    
+    # Fallback to local cache
     if DIMENSION_CACHE_FILE.exists():
-        print(f"[INFO] Loading image dimensions from cache: {DIMENSION_CACHE_FILE}")
+        print(f"[INFO] Loading image dimensions from local cache: {DIMENSION_CACHE_FILE}")
         try:
             with open(DIMENSION_CACHE_FILE, 'rb') as f:
                 return pickle.load(f)
         except Exception as e:
-            print(f"[WARNING] Failed to load cache: {e}. Will rebuild cache.")
+            print(f"[WARNING] Failed to load local cache: {e}. Will rebuild cache.")
     return {}
 
 def _save_dimension_cache(cache: dict):
-    """Save image dimensions cache to disk."""
+    """Save image dimensions cache to disk and Google Drive."""
     _ensure_dir(DIMENSION_CACHE_FILE.parent)
     try:
         with open(DIMENSION_CACHE_FILE, 'wb') as f:
             pickle.dump(cache, f)
         print(f"[INFO] Saved image dimensions cache: {DIMENSION_CACHE_FILE}")
+        
+        # Also save to Google Drive if available
+        if DRIVE_OUT_DIR:
+            try:
+                _ensure_dir(DRIVE_OUT_DIR)
+                drive_cache_file = DRIVE_OUT_DIR / "image_dimensions_cache.pkl"
+                with open(drive_cache_file, 'wb') as f:
+                    pickle.dump(cache, f)
+                print(f"[INFO] Saved cache to Google Drive: {drive_cache_file}")
+            except Exception as e:
+                print(f"[WARNING] Failed to save cache to Drive: {e}")
     except Exception as e:
-        print(f"[WARNING] Failed to save cache: {e}")
+        print(f"[WARNING] Failed to save local cache: {e}")
 
 def _build_categories_union(train_df: pd.DataFrame, test_df: pd.DataFrame) -> List[Dict]:
     """Consistent categories across splits: union of class_name values, sorted."""
@@ -245,6 +273,24 @@ def _df_to_coco(
         "categories": categories,
     }
 
+def _copy_from_drive(output_file: Path):
+    """Copy JSON file from Google Drive if it exists there."""
+    if DRIVE_OUT_DIR and DRIVE_OUT_DIR != output_file.parent:
+        drive_file = DRIVE_OUT_DIR / output_file.name
+        if drive_file.exists():
+            try:
+                _ensure_dir(output_file.parent)
+                # Read from drive and write to local
+                with open(drive_file, 'r') as src:
+                    data = json.load(src)
+                with open(output_file, 'w') as dst:
+                    json.dump(data, dst, indent=2)
+                print(f"[OK] Copied from Google Drive: {drive_file} -> {output_file}")
+                return True
+            except Exception as e:
+                print(f"[WARNING] Failed to copy from Drive: {e}")
+    return False
+
 def _copy_to_drive(output_file: Path):
     """Copy JSON file to Google Drive if in Colab."""
     if DRIVE_OUT_DIR and DRIVE_OUT_DIR != output_file.parent:
@@ -270,9 +316,22 @@ def main(skip_if_exists=True):
     Args:
         skip_if_exists: If True, skip conversion if output files already exist
     """
-    # Check if output files already exist
+    # First, try to copy from Google Drive if files exist there
+    if skip_if_exists and DRIVE_OUT_DIR:
+        print("[INFO] Checking Google Drive for existing annotations...")
+        train_copied = _copy_from_drive(TRAIN_COCO_JSON)
+        test_copied = _copy_from_drive(TEST_COCO_JSON)
+        
+        if train_copied and test_copied:
+            print("[INFO] Successfully loaded annotations from Google Drive!")
+            print(f"  {TRAIN_COCO_JSON}")
+            print(f"  {TEST_COCO_JSON}")
+            print("[INFO] Skipping conversion. Using files from Google Drive.")
+            return
+    
+    # Check if output files already exist locally
     if skip_if_exists and TRAIN_COCO_JSON.exists() and TEST_COCO_JSON.exists():
-        print("[INFO] Output JSON files already exist!")
+        print("[INFO] Output JSON files already exist locally!")
         print(f"  {TRAIN_COCO_JSON}")
         print(f"  {TEST_COCO_JSON}")
         print("[INFO] Skipping conversion. Using existing files.")
