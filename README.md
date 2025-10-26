@@ -13,13 +13,79 @@ A complete pipeline for downloading, organizing, and training object detection m
 
 ## Installation
 
-1. Clone this repository and install dependencies:
+### Prerequisites
+
+- Python 3.8 or higher
+- pip package manager
+- Git (for cloning the repository)
+
+### Step-by-Step Setup
+
+#### 1. Clone the Repository
+
+```bash
+git clone <repository-url>
+cd chest-xray-resolution-impact
+```
+
+#### 2. Create a Virtual Environment
+
+**On Windows:**
+```bash
+python -m venv venv
+venv\Scripts\activate
+```
+
+**On Linux/Mac:**
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+#### 3. Upgrade pip (Recommended)
+
+```bash
+python -m pip install --upgrade pip
+```
+
+#### 4. Install Requirements
 
 ```bash
 pip install -r requirements.txt
 ```
 
-2. For Google Colab users:
+**Note:** If you encounter installation errors:
+
+- **PyTorch issues**: Visit [pytorch.org](https://pytorch.org/) to get the correct installation command for your system
+- **pycocotools issues on Windows**: Try installing Visual C++ Build Tools or use: `pip install pycocotools-windows`
+- **MMCV issues**: Refer to the [MMCV installation guide](https://mmcv.readthedocs.io/en/latest/get_started/installation.html)
+
+#### 5. Verify Installation
+
+Run a quick test to verify all packages are installed correctly:
+
+```bash
+python -c "import torch; import transformers; import ultralytics; print('All packages imported successfully!')"
+```
+
+### Alternative: Automated Setup Script
+
+You can also use the provided setup script for automated installation:
+
+```bash
+python srcipts/setup_environment.py
+```
+
+This script will:
+- Create a virtual environment
+- Install all dependencies
+- Verify the installation
+- Provide activation instructions
+
+### Optional: Google Colab Setup
+
+If you plan to use Google Colab:
+
 ```python
 from google.colab import drive
 drive.mount('/content/drive')
@@ -143,7 +209,36 @@ drive.mount('/content/drive')
 
 ## Troubleshooting
 
-### Kaggle API Issues
+### Common Installation Issues
+
+#### PyTorch Installation Errors
+If PyTorch fails to install, visit [pytorch.org](https://pytorch.org/) and get the installation command specific to your system (CPU or GPU).
+
+#### pycocotools on Windows
+Windows users may encounter issues installing `pycocotools`. Solutions:
+1. Install Visual C++ Build Tools
+2. Use the Windows-specific package: `pip install pycocotools-windows`
+3. Or use Conda: `conda install -c conda-forge pycocotools`
+
+#### MMDet Installation Issues
+If using MMDetection, you may need to install MMEngine first:
+```bash
+pip install mmengine
+pip install "mmcv>=2.0.0" -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.0/index.html
+```
+
+#### CUDA Version Mismatch
+If you get CUDA-related errors, ensure PyTorch matches your CUDA version:
+```bash
+# Check CUDA version
+nvidia-smi
+
+# Install matching PyTorch version from pytorch.org
+```
+
+### Runtime Issues
+
+#### Kaggle API Issues
 If you encounter Kaggle API issues:
 1. Ensure you have a Kaggle account
 2. Create an API token from Kaggle settings
@@ -154,14 +249,37 @@ os.environ['KAGGLE_USERNAME'] = 'your_username'
 os.environ['KAGGLE_KEY'] = 'your_api_key'
 ```
 
-### Memory Issues
+#### Memory Issues
 For large batch sizes or high-resolution training:
 - Reduce batch size: `--batch-size 8`
 - Use smaller model: `--model yolov8n`
 - Enable gradient checkpointing if available
+- Use gradient accumulation: `--gradient-accumulation-steps 2`
+
+#### GPU Not Detected
+If your GPU is not being used:
+1. Check if CUDA is available: `torch.cuda.is_available()`
+2. Verify GPU drivers are installed
+3. Reinstall PyTorch with CUDA support
+
+#### Import Errors
+If you get "ModuleNotFoundError":
+1. Ensure your virtual environment is activated
+2. Try reinstalling the package: `pip install --upgrade <package-name>`
+3. Check if the package is in your requirements.txt
 
 ### Google Drive Space
 The NIH dataset is large (~42GB). Ensure you have sufficient Google Drive storage.
+
+### Dependencies Conflicts
+If you encounter dependency conflicts:
+```bash
+# Create a fresh virtual environment
+python -m venv venv_fresh
+source venv_fresh/bin/activate  # On Windows: venv_fresh\Scripts\activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
 
 ## Custom Models
 

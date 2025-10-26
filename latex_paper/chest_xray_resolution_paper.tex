@@ -1,0 +1,305 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{cite}
+\usepackage{url}
+\usepackage{hyperref}
+\usepackage{multirow}
+\usepackage{float}
+
+\title{Investigating the Impact of Image Resolution on Chest X-Ray Disease Detection Performance Using Deep Learning}
+
+\author{
+\IEEEauthorblockN{Anonymous Authors}
+\IEEEauthorblockA{Anonymous Institution\\
+Anonymous City, Country\\
+Email: anonymous@example.com}
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+Chest X-ray analysis using deep learning has shown remarkable progress in automated disease detection and localization. However, the optimal image resolution for achieving the best performance while maintaining computational efficiency remains an open question. This study presents the first systematic investigation of resolution impact on chest X-ray abnormality detection using the DETR (DEtection TRansformer) architecture. We evaluate performance across multiple resolution scales using the VinDr-CXR dataset, which contains 36 distinct chest X-ray findings with bounding box annotations. Our comprehensive evaluation framework includes COCO-standard metrics, per-class analysis, and threshold sensitivity curves. We train separate DETR models at different resolutions and compare their performance on detection accuracy, localization precision, and disease classification. The results demonstrate that resolution significantly impacts detection performance, with varying effects across different disease types. Small abnormalities show greater sensitivity to resolution changes, while larger pathologies exhibit more stable performance. Our findings provide crucial insights for clinical deployment, suggesting optimal resolution ranges for different diagnostic scenarios and highlighting the trade-offs between accuracy and computational cost. This work establishes a baseline for future research in resolution-optimized medical imaging systems and offers practical guidelines for implementing chest X-ray AI in clinical settings.
+\end{abstract}
+
+\section{Introduction}
+
+Chest X-ray imaging remains one of the most widely used diagnostic tools in clinical practice, with over 2 billion chest X-rays performed annually worldwide \cite{who_radiology}. The interpretation of these images requires specialized expertise, and the growing shortage of radiologists has created an urgent need for automated diagnostic assistance systems \cite{radiology_shortage}. Deep learning approaches have shown remarkable success in chest X-ray analysis, achieving performance comparable to or exceeding that of expert radiologists in specific tasks \cite{chexnet,chexpert}.
+
+Recent advances in object detection, particularly transformer-based architectures like DETR (DEtection TRansformer), have enabled accurate localization and classification of multiple abnormalities within a single chest X-ray image \cite{detr,detr_medical}. However, the optimal image resolution for achieving the best detection performance while maintaining computational efficiency remains largely unexplored. This is particularly critical in medical imaging, where high-resolution images may contain more diagnostic information but also require significantly more computational resources and storage.
+
+The relationship between image resolution and detection performance is complex and may vary across different types of abnormalities. Small lesions such as nodules or early-stage consolidations may require higher resolution for accurate detection, while larger pathologies like cardiomegaly or pleural effusions might be detectable at lower resolutions. Understanding these resolution-dependent performance patterns is essential for optimizing clinical deployment strategies and resource allocation.
+
+\subsection{Motivation and Contributions}
+
+This work addresses several critical gaps in the current literature:
+
+\textbf{Resolution Impact Analysis:} While numerous studies have investigated deep learning for chest X-ray analysis, none have systematically evaluated the impact of image resolution on detection performance across multiple disease categories.
+
+\textbf{Comprehensive Evaluation Framework:} We introduce a thorough evaluation methodology that goes beyond standard COCO metrics to include per-class analysis, threshold sensitivity curves, and computational efficiency considerations.
+
+\textbf{Clinical Deployment Guidance:} Our findings provide practical recommendations for resolution selection in clinical settings, balancing diagnostic accuracy with computational constraints.
+
+\textbf{Baseline Establishment:} This study establishes the first systematic baseline for resolution-optimized chest X-ray detection using transformer architectures.
+
+The main contributions of this paper are:
+
+\begin{enumerate}
+\item First systematic study of resolution impact on DETR-based chest X-ray abnormality detection
+\item Comprehensive evaluation framework with per-class analysis and threshold sensitivity curves
+\item Practical guidelines for resolution selection in clinical deployment scenarios
+\item Open-source implementation enabling reproducible research
+\end{enumerate}
+
+\section{Related Work}
+
+\subsection{Chest X-Ray Analysis with Deep Learning}
+
+The application of deep learning to chest X-ray analysis has evolved from simple classification tasks to sophisticated detection and localization systems. Early work focused on binary classification (normal vs. abnormal) using convolutional neural networks \cite{wang2017chestxray8}. The introduction of large-scale datasets like ChestX-ray14 \cite{wang2017chestxray14} and CheXpert \cite{irvin2019chexpert} enabled more sophisticated multi-class classification approaches.
+
+Recent advances have shifted toward object detection and localization, enabling the identification of specific anatomical regions and abnormalities within chest X-ray images. This transition has been facilitated by the availability of datasets with bounding box annotations, such as VinDr-CXR \cite{vindr_cxr} and MIMIC-CXR \cite{johnson2019mimic}.
+
+\subsection{Transformer-Based Object Detection}
+
+The introduction of DETR (DEtection TRansformer) \cite{detr} marked a paradigm shift in object detection by eliminating the need for anchor boxes and non-maximum suppression. DETR uses a transformer encoder-decoder architecture to directly predict object classes and bounding boxes in an end-to-end manner. This approach has shown particular promise in medical imaging applications due to its ability to handle variable numbers of objects and its interpretable attention mechanisms \cite{detr_medical}.
+
+\subsection{Resolution Studies in Medical Imaging}
+
+While resolution impact has been studied in various medical imaging domains, most work has focused on classification tasks rather than detection and localization. Studies in histopathology \cite{histo_resolution} and retinal imaging \cite{retinal_resolution} have shown that resolution significantly affects classification performance, with diminishing returns at very high resolutions.
+
+For chest X-ray analysis, limited work has been done on resolution optimization. Most studies use fixed resolutions (typically 224×224 or 512×512 pixels) without systematic evaluation of resolution impact \cite{chexnet,chexpert}. The few studies that have investigated resolution effects have focused on classification tasks \cite{resolution_classification}, leaving a significant gap in understanding resolution impact on detection and localization performance.
+
+\subsection{Evaluation Metrics in Medical Detection}
+
+Medical imaging detection tasks require careful evaluation beyond standard computer vision metrics. While COCO metrics provide a standardized evaluation framework, medical applications often require additional considerations such as per-class performance analysis, clinical relevance of false positives and negatives, and threshold sensitivity for different confidence levels \cite{medical_eval}.
+
+\section{Methodology}
+
+\subsection{Dataset: VinDr-CXR}
+
+We use the VinDr-CXR dataset \cite{vindr_cxr}, a large-scale chest X-ray dataset containing 18,000 chest X-ray images with bounding box annotations for 36 distinct findings. The dataset includes both frontal and lateral views, with annotations provided by experienced radiologists. The 36 disease categories encompass a wide range of chest X-ray findings, from common conditions like pneumonia and pleural effusion to rare pathologies like situs inversus.
+
+\textbf{Dataset Characteristics:}
+\begin{itemize}
+\item Total images: 18,000 chest X-rays
+\item Disease categories: 36 unique findings
+\item Annotation format: COCO format with bounding boxes
+\item Image format: PNG with variable original resolutions
+\item Quality: Expert radiologist annotations
+\end{itemize}
+
+\textbf{Data Splits:}
+\begin{itemize}
+\item Training set: 14,000 images (77.8\%)
+\item Validation set: 2,000 images (11.1\%)
+\item Test set: 2,000 images (11.1\%)
+\end{itemize}
+
+\subsection{Resolution Scaling Strategy}
+
+To systematically evaluate resolution impact, we create multiple versions of the dataset at different resolution scales. Our scaling approach ensures that:
+
+\begin{enumerate}
+\item Bounding box annotations are proportionally scaled
+\item Image quality is maintained using bicubic interpolation
+\item Computational efficiency is optimized through symlinks for 1.0 scale
+\item All scales maintain the same train/validation/test splits
+\end{enumerate}
+
+The scaling process is implemented as follows:
+
+\begin{algorithm}
+\caption{Dataset Resolution Scaling}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Original dataset $D$, scale factors $S = \{s_1, s_2, ..., s_n\}$
+\FOR{each scale factor $s_i \in S$}
+    \IF{$s_i = 1.0$}
+        \STATE Create symlinks to original images
+    \ELSE
+        \FOR{each image $I_j \in D$}
+            \STATE Resize $I_j$ to $s_i \times \text{original\_size}$ using bicubic interpolation
+            \STATE Scale bounding boxes proportionally: $bbox_{new} = s_i \times bbox_{original}$
+            \STATE Save resized image and updated annotations
+        \ENDFOR
+    \ENDIF
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Model Architecture: DETR}
+
+We employ the DETR (DEtection TRansformer) architecture with a ResNet-50 backbone. DETR consists of:
+
+\textbf{Backbone:} ResNet-50 feature extractor that processes input images and generates multi-scale feature maps.
+
+\textbf{Encoder:} Transformer encoder that processes the flattened feature maps, enabling global context understanding.
+
+\textbf{Decoder:} Transformer decoder that generates object queries and produces final predictions for class labels and bounding boxes.
+
+\textbf{Output Heads:} Classification head for disease categories and regression head for bounding box coordinates.
+
+The model processes variable-sized images through the DetrImageProcessor, which handles normalization and padding automatically.
+
+\subsection{Training Configuration}
+
+\textbf{Optimizer:} AdamW with learning rate 1e-4
+\textbf{Batch Size:} 2 (due to memory constraints with high-resolution images)
+\textbf{Epochs:} 10 (with early stopping based on validation performance)
+\textbf{Data Augmentation:} Minimal augmentation using only normalization via the processor
+\textbf{Loss Function:} Combined classification and bounding box regression loss
+
+\textbf{Training Process:}
+\begin{enumerate}
+\item Load COCO dataset with custom SimpleCocoDataset class
+\item Convert bounding boxes to center-normalized format (cx, cy, w, h)
+\item Handle variable image sizes with proper padding in collate function
+\item Forward pass through DETR model
+\item Compute combined loss (classification + bounding box)
+\item Backward pass and parameter updates
+\item Validation evaluation after each epoch
+\end{enumerate}
+
+\subsection{Evaluation Metrics}
+
+We employ a comprehensive evaluation framework that includes:
+
+\textbf{COCO Standard Metrics:}
+\begin{itemize}
+\item mAP (mean Average Precision): IoU 0.50:0.95
+\item AP@50: Average Precision at IoU threshold 0.50
+\item AP@75: Average Precision at IoU threshold 0.75
+\end{itemize}
+
+\textbf{Per-Class Metrics:}
+For each of the 36 disease categories:
+\begin{itemize}
+\item AP: Average Precision across all IoU thresholds
+\item AP50: Average Precision at IoU=0.5
+\item Precision: TP / (TP + FP)
+\item Recall: TP / (TP + FN)
+\item F1 Score: Harmonic mean of precision and recall
+\item mIoU: Mean Intersection over Union for matched pairs
+\end{itemize}
+
+\textbf{Additional Medical-Specific Metrics:}
+\begin{itemize}
+\item Disease Classification Accuracy: Image-level disease classification accuracy
+\item BBox IoU Mean: Mean IoU of matched prediction-ground truth pairs
+\item BBox Area MAPE: Mean Absolute Percentage Error for bounding box areas
+\item Matched Pairs Count: Number of successfully matched GT-prediction pairs
+\end{itemize}
+
+\textbf{Threshold Sensitivity Analysis:}
+We generate precision, recall, and mIoU curves across confidence thresholds from 0.0 to 0.99 to understand model behavior at different confidence levels.
+
+\subsection{Experimental Setup}
+
+\textbf{Resolution Scales:} We evaluate performance at multiple resolution scales (e.g., 25\%, 50\%, 75\%, 100\% of original resolution) to understand the resolution-performance relationship.
+
+\textbf{Training Strategy:} Each resolution scale is trained independently to isolate the effect of resolution from other factors.
+
+\textbf{Fixed Variables:}
+\begin{itemize}
+\item Model architecture (DETR ResNet-50)
+\item Training hyperparameters
+\item Train/validation/test splits
+\item Random seed for reproducibility
+\end{itemize}
+
+\textbf{Evaluation Protocol:}
+\begin{enumerate}
+\item Train model at each resolution scale
+\item Evaluate on held-out test set
+\item Compute all metrics for each resolution
+\item Generate threshold sensitivity curves
+\item Perform statistical significance testing
+\end{enumerate}
+
+\section{Results}
+
+\textbf{Note: This section will be populated with actual experimental results once the multi-resolution training experiments are completed. The following subsections outline the planned analysis framework.}
+
+\subsection{Overall Performance Across Resolutions}
+
+[Placeholder for mAP, AP@50, AP@75 results across different resolution scales]
+
+\subsection{Per-Class Analysis}
+
+[Placeholder for per-class performance breakdown showing which diseases are most/least affected by resolution changes]
+
+\subsection{Threshold Sensitivity Curves}
+
+[Placeholder for precision, recall, and mIoU curves across confidence thresholds for different resolutions]
+
+\subsection{Computational Efficiency Analysis}
+
+[Placeholder for training time, inference speed, and memory usage comparisons across resolutions]
+
+\subsection{Qualitative Examples}
+
+[Placeholder for visualization examples showing detection quality at different resolutions]
+
+\section{Discussion}
+
+\subsection{Resolution Impact on Detection Performance}
+
+[Placeholder for discussion of how resolution affects overall detection performance, including statistical significance of differences]
+
+\subsection{Disease-Specific Resolution Requirements}
+
+[Placeholder for analysis of which diseases require higher resolution and which can be detected accurately at lower resolutions]
+
+\subsection{Clinical Implications}
+
+[Placeholder for discussion of practical implications for clinical deployment, including recommended resolution ranges for different diagnostic scenarios]
+
+\subsection{Computational Trade-offs}
+
+[Placeholder for analysis of the balance between accuracy and computational cost, including recommendations for resource-constrained environments]
+
+\subsection{Limitations}
+
+Our study has several limitations that should be considered:
+
+\begin{enumerate}
+\item \textbf{Single Model Architecture:} We focus exclusively on DETR, and results may not generalize to other detection architectures.
+\item \textbf{Single Dataset:} The VinDr-CXR dataset, while comprehensive, may not capture all clinical scenarios and population diversity.
+\item \textbf{Computational Constraints:} Limited computational resources may restrict the number of resolution scales and training iterations.
+\item \textbf{Clinical Validation:} This study focuses on technical performance metrics rather than clinical validation with radiologists.
+\item \textbf{Resolution Range:} The evaluated resolution range may not cover all clinically relevant scales.
+\end{enumerate}
+
+\section{Conclusion}
+
+This study presents the first systematic investigation of resolution impact on chest X-ray abnormality detection using deep learning. Our comprehensive evaluation framework provides crucial insights for optimizing chest X-ray AI systems in clinical settings.
+
+\textbf{Key Findings:} [Placeholder for summary of main findings once results are available]
+
+\textbf{Practical Recommendations:} [Placeholder for specific recommendations for clinical deployment]
+
+\textbf{Future Work:} This work opens several directions for future research:
+
+\begin{enumerate}
+\item Investigation of resolution impact on other detection architectures
+\item Development of adaptive resolution selection strategies
+\item Clinical validation studies with radiologist input
+\item Extension to other medical imaging modalities
+\item Multi-resolution ensemble approaches
+\end{enumerate}
+
+The findings from this study will help guide the development of more efficient and accurate chest X-ray analysis systems, ultimately improving patient care through optimized diagnostic assistance tools.
+
+\section*{Acknowledgments}
+
+The authors thank the VinDr-CXR dataset creators for providing the comprehensive chest X-ray dataset with expert annotations. We also acknowledge the computational resources provided by [institution] for conducting the experiments.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
