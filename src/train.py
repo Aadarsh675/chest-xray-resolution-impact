@@ -232,7 +232,7 @@ def train_and_validate(
     return best_epoch, best_metrics
 
 
-def main(args):
+def main(args, wandb_run=None):
     """Main entry point for training from command line arguments."""
     import os
     import wandb
@@ -309,22 +309,29 @@ def main(args):
         MODEL_NAME, num_labels=num_classes, ignore_mismatched_sizes=True
     ).to(device)
     
-    # Initialize wandb
-    run_name = f"detr_vindr_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-    wandb.init(
-        project="chest-xray-resolution-impact",
-        name=run_name,
-        config={
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "model": MODEL_NAME,
-            "classes": class_names,
-            "num_classes": num_classes,
-        }
-    )
+    # Initialize wandb only if not provided externally
+    if wandb_run is None:
+        run_name = f"detr_vindr_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        wandb.init(
+            project="chest-xray-resolution-impact",
+            name=run_name,
+            config={
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "model": MODEL_NAME,
+                "classes": class_names,
+                "num_classes": num_classes,
+            }
+        )
+        should_finish_wandb = True
+    else:
+        should_finish_wandb = False
     
     # Create weights directory
-    weights_dir = os.path.join(args.weights_dir, run_name)
+    if wandb_run is None:
+        weights_dir = os.path.join(args.weights_dir, run_name)
+    else:
+        weights_dir = os.path.join(args.weights_dir, wandb_run.name)
     os.makedirs(weights_dir, exist_ok=True)
     
     # Train
@@ -349,6 +356,8 @@ def main(args):
     print(f"\nTraining complete! Best epoch: {best_epoch}")
     print(f"Weights saved to: {weights_dir}")
     
-    wandb.finish()
+    # Only finish wandb if we created the session
+    if should_finish_wandb:
+        wandb.finish()
     
     return best_epoch, best_metrics

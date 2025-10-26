@@ -542,7 +542,7 @@ def run_test(model, processor, device, num_classes,
     return test_metrics
 
 
-def main(args):
+def main(args, wandb_run=None):
     """Main entry point for testing from command line arguments."""
     import os
     import torch

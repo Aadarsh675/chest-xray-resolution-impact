@@ -44,8 +44,34 @@ def main():
                        help='Model architecture to use (default: rtmdet)')
     parser.add_argument('--resolution', type=str, default='original',
                        help='Image resolution to use (default: original)')
+    parser.add_argument('--wandb-project', type=str, default='chest-xray-resolution-impact',
+                       help='WandB project name (default: chest-xray-resolution-impact)')
+    parser.add_argument('--wandb-entity', type=str, default='aadarsh-supe-23-fremont-high-school',
+                       help='WandB entity name (default: aadarsh-supe-23-fremont-high-school)')
     
     args = parser.parse_args()
+    
+    # Initialize wandb session if needed
+    wandb_run = None
+    if args.mode in ['train', 'test', 'both']:
+        import wandb
+        import uuid
+        from datetime import datetime
+        
+        run_name = f"detr_vindr_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        wandb_run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            name=run_name,
+            config={
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "model": args.model,
+                "resolution": args.resolution,
+                "mode": args.mode,
+            }
+        )
+        print(f"WandB run initialized: {wandb_run.url}")
     
     # Set up paths using environment configuration
     ANNO_DIR     = config['anno_dir']  # COCO jsons live here
@@ -91,7 +117,7 @@ def main():
         )
         
         try:
-            train_main(train_args)
+            train_main(train_args, wandb_run=wandb_run)
             print("Training completed successfully!")
         except Exception as e:
             print(f"Training failed: {e}")
@@ -115,11 +141,17 @@ def main():
         )
         
         try:
-            test_main(test_args)
+            test_main(test_args, wandb_run=wandb_run)
             print("Testing completed successfully!")
         except Exception as e:
             print(f"Testing failed: {e}")
             return 1
+    
+    # Finish wandb session
+    if wandb_run is not None:
+        import wandb
+        wandb.finish()
+        print("WandB session finished")
     
     print("\n" + "="*60)
     print("PIPELINE COMPLETED")
