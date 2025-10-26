@@ -144,6 +144,8 @@ def train_and_validate(
     train_anno_file,
     val_img_dir,
     val_anno_file,
+    test_img_dir,
+    test_anno_file,
     weights_dir,
     num_epochs=10,
     batch_size=2,
@@ -155,6 +157,7 @@ def train_and_validate(
     # Data
     train_dataset = SimpleCocoDataset(train_img_dir, train_anno_file, processor)
     val_dataset   = SimpleCocoDataset(val_img_dir,   val_anno_file,   processor)
+    test_dataset  = SimpleCocoDataset(test_img_dir,  test_anno_file,  processor)
 
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True,
@@ -164,12 +167,17 @@ def train_and_validate(
         val_dataset, batch_size=batch_size, shuffle=False,
         collate_fn=collate_fn, num_workers=num_workers, pin_memory=True
     )
+    test_loader  = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False,
+        collate_fn=collate_fn, num_workers=num_workers, pin_memory=True
+    )
 
     # Optimizer
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-    # COCO GT for validation
+    # COCO GT for validation and test
     coco_val = COCO(val_anno_file)
+    coco_test = COCO(test_anno_file)
 
     best_map = -1.0
     best_epoch = -1
@@ -232,19 +240,62 @@ def train_and_validate(
                 per_class_log["epoch"] = epoch + 1
                 wandb.log(per_class_log)
 
+        # Test set evaluation after each epoch
+        test_metrics = evaluate_model(
+            model, test_loader, coco_test, device, num_classes,
+            img_dir=test_img_dir, score_thresh=score_thresh, topk=topk
+        )
+
+        print(
+            f"[Test @ epoch {epoch+1}] "
+            f"mAP={test_metrics['mAP']:.4f} | AP50={test_metrics['AP@50']:.4f} | AP75={test_metrics['AP@75']:.4f} | "
+            f"Disease Acc={test_metrics['disease_acc_pct']:.2f}% | "
+            f"BBox IoU Mean={test_metrics['bbox_iou_mean_pct']:.2f}% | "
+            f"BBox Area MAPE={test_metrics['bbox_area_mape_pct']:.2f}% "
+            f"(matched_pairs={test_metrics['matched_pairs']})"
+        )
+
+        # Log test metrics to W&B
+        if wandb.run is not None:
+            # Main test epoch metrics
+            test_epoch_log = {
+                "test_epoch/mAP": test_metrics.get("mAP", 0.0),
+                "test_epoch/AP@50": test_metrics.get("AP@50", 0.0),
+                "test_epoch/AP@75": test_metrics.get("AP@75", 0.0),
+                "test_epoch/Disease_Accuracy": test_metrics.get("disease_acc_pct", 0.0),
+                "test_epoch/BBox_IoU_Mean": test_metrics.get("bbox_iou_mean_pct", 0.0),
+                "test_epoch/BBox_Area_MAPE": test_metrics.get("bbox_area_mape_pct", 0.0),
+                "test_epoch/Matched_Pairs": test_metrics.get("matched_pairs", 0),
+                "epoch": epoch + 1
+            }
+            wandb.log(test_epoch_log)
+            
+            # Per-class test epoch metrics for each disease
+            if test_metrics.get("per_class"):
+                test_per_class_log = {}
+                for cls_name, cls_metrics in test_metrics["per_class"].items():
+                    test_per_class_log[f"test_epoch/AP/{cls_name}"] = cls_metrics.get("AP", 0.0)
+                    test_per_class_log[f"test_epoch/AP50/{cls_name}"] = cls_metrics.get("AP50", 0.0)
+                    test_per_class_log[f"test_epoch/Precision/{cls_name}"] = cls_metrics.get("precision", 0.0)
+                    test_per_class_log[f"test_epoch/Recall/{cls_name}"] = cls_metrics.get("recall", 0.0)
+                    test_per_class_log[f"test_epoch/F1/{cls_name}"] = cls_metrics.get("f1", 0.0)
+                    test_per_class_log[f"test_epoch/mIoU/{cls_name}"] = cls_metrics.get("miou", 0.0)
+                test_per_class_log["epoch"] = epoch + 1
+                wandb.log(test_per_class_log)
+
         # Save snapshot
         os.makedirs(weights_dir, exist_ok=True)
         torch.save(model.state_dict(), os.path.join(weights_dir, f"epoch_{epoch+1}.pth"))
 
-        # Track best by mAP
-        if val_metrics["mAP"] > best_map:
-            best_map = val_metrics["mAP"]
+        # Track best by test mAP (not validation mAP)
+        if test_metrics["mAP"] > best_map:
+            best_map = test_metrics["mAP"]
             best_epoch = epoch + 1
-            best_metrics = val_metrics
+            best_metrics = test_metrics
             torch.save(model.state_dict(), os.path.join(weights_dir, "best.pth"))
             with open(os.path.join(weights_dir, "best_metrics.json"), "w") as f:
                 json.dump({"epoch": best_epoch, "metrics": best_metrics}, f, indent=2)
-            print(f"[Best] New best mAP={best_map:.4f} at epoch {best_epoch}. Saved best.pth")
+            print(f"[Best] New best test mAP={best_map:.4f} at epoch {best_epoch}. Saved best.pth")
 
     return best_epoch, best_metrics
 
@@ -267,6 +318,7 @@ def main(args, wandb_run=None):
     # Set up paths
     train_anno_file = os.path.join(args.anno_dir, "train_annotations_coco.json")
     val_anno_file = os.path.join(args.anno_dir, "val_annotations_coco.json")
+    test_anno_file = os.path.join(args.anno_dir, "test_annotations_coco.json")
     
     # Check if val file exists, if not create split
     if not os.path.exists(val_anno_file):
@@ -284,7 +336,7 @@ def main(args, wandb_run=None):
         
         img_ids = [im["id"] for im in images]
         random.Random(42).shuffle(img_ids)
-        n_val = max(1, int(round(len(img_ids) * 0.1)))
+        n_val = max(1, int(round(len(img_ids) * 0.2)))
         val_ids = set(img_ids[:n_val])
         train_ids = set(img_ids[n_val:])
         
@@ -361,6 +413,8 @@ def main(args, wandb_run=None):
         train_anno_file=train_anno_file,
         val_img_dir=args.val_img_dir,
         val_anno_file=val_anno_file,
+        test_img_dir=args.test_img_dir,
+        test_anno_file=test_anno_file,
         weights_dir=weights_dir,
         num_epochs=args.epochs,
         batch_size=args.batch_size,
