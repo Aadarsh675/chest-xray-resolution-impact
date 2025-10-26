@@ -66,9 +66,19 @@ class SimpleCocoDataset(Dataset):
 
         encoding = self.processor(images=image, return_tensors="pt")
         pixel_values = encoding["pixel_values"].squeeze(0)
+        
+        # Ensure boxes and labels are 2D tensors even when empty
+        # This is required for DETR to work properly
+        if len(boxes) == 0:
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros((0,), dtype=torch.long)
+        else:
+            boxes = torch.tensor(boxes, dtype=torch.float32)
+            labels = torch.tensor(labels, dtype=torch.long)
+        
         target = {
-            "class_labels": torch.tensor(labels, dtype=torch.long),       # can be empty
-            "boxes": torch.tensor(boxes, dtype=torch.float32),            # can be empty
+            "class_labels": labels,
+            "boxes": boxes,
             "image_id": torch.tensor([img_id], dtype=torch.int64),
         }
         return pixel_values, target
